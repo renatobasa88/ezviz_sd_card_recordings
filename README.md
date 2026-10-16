@@ -29,7 +29,7 @@ The integration includes local `brand/icon.png` and `brand/dark_icon.png` assets
 ### HACS (Recommended)
 1. Click the button below to add this custom repository to HACS\
 [![Open your Home Assistant instance and open a repository inside the Home Assistant Community Store.](https://my.home-assistant.io/badges/hacs_repository.svg)](https://my.home-assistant.io/redirect/hacs_repository/?category=integration&repository=ezviz_sd_card_recordings&owner=renatobasa88)
-2. Install "Google Find My Device" from HACS
+2. Install "EZVIZ SD Card Recordings for Home Assistant" from HACS
 3. Restart Home Assistant
 4. Add the integration through the UI
 
