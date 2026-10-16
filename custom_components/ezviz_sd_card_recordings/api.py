@@ -127,14 +127,24 @@ class EzvizArchiveApi:
             query_size = 100
             max_query_calls = 256
             max_split_depth = 16
+            # DIAGNOSTIC HOTFIX: query fixed 6-hour windows even if the full-day
+            # response contains fewer than 100 items. The previous hotfix assumed
+            # truncation only happens when the endpoint returns exactly 100 records;
+            # this assumption is not proven and could miss silently-truncated results.
+            build_marker = "fixed-6h-diagnostic-v2"
             stats = {
                 "calls": 0,
                 "raw_descriptors": 0,
                 "splits": 0,
                 "saturated_windows": 0,
                 "budget_exhausted": False,
+                "base_windows": 0,
             }
             extractor = getattr(client, "extract_record_list", None)
+            try:
+                local_timezone = ZoneInfo(self.hass.config.time_zone)
+            except (ZoneInfoNotFoundError, TypeError):
+                local_timezone = datetime.now().astimezone().tzinfo
 
             def extract_descriptors(payload: Any) -> list[Any]:
                 if callable(extractor):
@@ -144,6 +154,19 @@ class EzvizArchiveApi:
                 if not isinstance(found, list):
                     raise RuntimeError("EZVIZ returned an unexpected record-list response")
                 return found
+
+            def describe_records(found: list[Any]) -> tuple[int, str, str, str, str]:
+                """Return safe metadata only; never log descriptor payload values."""
+                parsed = normalize_records({"records": found}, local_timezone=local_timezone)
+                if parsed:
+                    first_start = min(item["start"] for item in parsed).strftime("%H:%M:%S")
+                    latest_start = max(item["start"] for item in parsed).strftime("%H:%M:%S")
+                    latest_end = max(item["end"] for item in parsed).strftime("%H:%M:%S")
+                else:
+                    first_start = latest_start = latest_end = "unparsed"
+                first = next((item for item in found if isinstance(item, dict)), None)
+                field_names = ",".join(sorted(str(key) for key in first.keys()))[:180] if first else "none"
+                return len(parsed), first_start, latest_start, latest_end, field_names
 
             def query_interval(
                 interval_start: datetime,
@@ -171,6 +194,25 @@ class EzvizArchiveApi:
                 )
                 found = extract_descriptors(payload)
                 stats["raw_descriptors"] += len(found)
+                parsed_count, first_start, latest_start, latest_end, field_names = describe_records(found)
+                # Keep these diagnostics at WARNING temporarily so the result is
+                # visible in standard Home Assistant logs without enabling debug.
+                # The distinct marker confirms which api.py implementation is loaded.
+                LOGGER.warning(
+                    "EZVIZ ARCHIVE DIAG build=%s camera=%s day=%s window=%s..%s "
+                    "raw=%d parsed=%d first_start=%s latest_start=%s latest_end=%s fields=[%s]",
+                    build_marker,
+                    api_serial,
+                    selected_day,
+                    interval_start.strftime("%H:%M:%S"),
+                    interval_stop.strftime("%H:%M:%S"),
+                    len(found),
+                    parsed_count,
+                    first_start,
+                    latest_start,
+                    latest_end,
+                    field_names,
+                )
 
                 # A shorter response is not at the batch ceiling, so it is
                 # considered complete. Exactly 100 is split as well, because
@@ -233,14 +275,37 @@ class EzvizArchiveApi:
                     return fallback
                 return left + right
 
-            descriptors = query_interval(day_start, day_stop)
-            if descriptors is None:
-                descriptors = []
-            try:
-                local_timezone = ZoneInfo(self.hass.config.time_zone)
-            except (ZoneInfoNotFoundError, TypeError):
-                local_timezone = datetime.now().astimezone().tzinfo
+            # Begin with four independent windows. This tests whether the API is
+            # honoring start_time/stop_time and avoids relying only on the full-day
+            # result hitting exactly the 100-item limit. Any window that reaches
+            # 100 records is recursively split further by query_interval().
+            descriptors: list[Any] = []
+            window_start = day_start
+            while window_start < day_stop:
+                window_stop = min(window_start + timedelta(hours=6), day_stop)
+                stats["base_windows"] += 1
+                window_records = query_interval(window_start, window_stop)
+                if window_records is not None:
+                    descriptors.extend(window_records)
+                window_start = window_stop
+
             records = normalize_records({"records": descriptors}, local_timezone=local_timezone)
+            day_records = [item for item in records if item["start"].date() == selected_day]
+            records = day_records
+            LOGGER.warning(
+                "EZVIZ ARCHIVE DIAG completed build=%s camera=%s day=%s records=%d calls=%d "
+                "raw=%d base_windows=%d adaptive_splits=%d saturated=%d budget_exhausted=%s",
+                build_marker,
+                api_serial,
+                selected_day,
+                len(records),
+                stats["calls"],
+                stats["raw_descriptors"],
+                stats["base_windows"],
+                stats["splits"],
+                stats["saturated_windows"],
+                stats["budget_exhausted"],
+            )
             if stats["budget_exhausted"]:
                 LOGGER.warning(
                     "EZVIZ archive query reached its safety limit (%d requests) for %s on %s; "
