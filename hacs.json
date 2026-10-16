@@ -2,7 +2,5 @@
   "name": "EZVIZ SD Card Recordings for Home Assistant",
   "content_in_root": false,
   "render_readme": true,
-  "homeassistant": "2025.1.0",
-  "zip_release": true,
-  "filename": "ezviz_sd_card_recordings.zip"
+  "homeassistant": "2025.1.0"
 }
