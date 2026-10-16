@@ -3,7 +3,7 @@
   "name": "EZVIZ SD Card Recordings",
   "codeowners": [],
   "config_flow": true,
-  "documentation": "https://github.com/your-user/ezviz-sd-card-recordings",
+  "documentation": "https://github.com/renatobasa88/ezviz_sd_card_recordings",
   "integration_type": "hub",
   "iot_class": "cloud_polling",
   "requirements": [
