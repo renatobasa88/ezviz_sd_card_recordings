@@ -1,0 +1,89 @@
+{
+  "title": "EZVIZ SD Card Recordings",
+  "config": {
+    "step": {
+      "user": {
+        "title": "Connect an EZVIZ camera",
+        "description": "Browse SD-card recordings and download each selected clip on demand. Choose the EZVIZ API region for your account. Serial number accepts either the full sticker serial or the short API serial. Important: turn off Video Encryption in the EZVIZ app for compatible SD-card playback.",
+        "data": {
+          "username": "EZVIZ account",
+          "password": "Password",
+          "region": "EZVIZ API region",
+          "serial": "Camera serial number (full sticker serial or short API serial)",
+          "camera_name": "Name in Media Browser",
+          "channel": "Camera channel"
+        }
+      },
+      "mfa": {
+        "title": "Verify your EZVIZ account",
+        "description": "Enter the one-time code sent by EZVIZ to {username}.",
+        "data": {
+          "sms_code": "Verification code"
+        }
+      },
+      "region": {
+        "title": "Enter a custom EZVIZ API region",
+        "description": "Enter only the API hostname, for example apiisgp.ezvizlife.com. Do not include https:// or a path.",
+        "data": {
+          "custom_region": "API hostname"
+        }
+      }
+    },
+    "error": {
+      "invalid_auth": "The account or password was rejected by EZVIZ.",
+      "cannot_connect": "Could not connect to the EZVIZ service.",
+      "mfa_required": "The verification code was rejected. Try again.",
+      "unknown": "Could not authenticate. Check the region host and Home Assistant logs."
+    },
+    "abort": {
+      "already_configured": "This account/camera is already configured."
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "Configure media",
+        "menu_options": {
+          "configure_media": "Configure Media",
+          "delete_cache": "Delete all cache and recording"
+        }
+      },
+      "configure_media": {
+        "title": "Configure Media",
+        "description": "Choose date and recording order. Media Sync is Off by default. When enabled, the integration checks for new recordings every 15 minutes and downloads recordings in the selected rolling window. Cached videos and thumbnails are stored in .storage/ezviz_sd_card_recordings/<entry_id> by default. Set a Cold storage path outside your config (for example /media/ezviz_sd_card_recordings/front_camera) to avoid bloating backups.",
+        "data": {
+          "order_days": "Order of days in Media Browser",
+          "order_recordings": "Order of recordings in Media Browser",
+          "media_sync": "Media Sync"
+        }
+      },
+      "delete_cache": {
+        "title": "Delete all cache and recording",
+        "description": "Delete all locally cached videos and thumbnails for this camera. Recordings on the physical camera SD card are not deleted. This action cannot be undone.",
+        "data": {
+          "confirm": "I understand: delete all cached videos and thumbnails"
+        }
+      },
+      "sync_window": {
+        "title": "Media Sync settings",
+        "description": "Choose automatic sync to keep the latest 24 hours up to date, or a custom rolling window of 1–168 hours. Synchronization runs every 15 minutes. Cold storage path is optional; leave it empty to use the default private cache.",
+        "data": {
+          "sync_mode": "Synchronization window",
+          "cold_storage_path": "Cold storage path"
+        }
+      },
+      "sync_hours": {
+        "title": "Custom synchronization window",
+        "description": "Enter the number of recent hours to keep cached. New recordings in this rolling window are picked up automatically during the 15-minute checks. Maximum: 168 hours (7 days).",
+        "data": {
+          "sync_hours": "Number of hours to keep synchronized"
+        }
+      }
+    },
+    "error": {
+      "invalid_path": "Enter an absolute filesystem path.",
+      "path_in_use": "This cold storage path is already assigned to another camera.",
+      "invalid_hours": "Enter a number from 1 to 168 hours."
+    }
+  }
+}
