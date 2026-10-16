@@ -4,6 +4,7 @@
   "codeowners": [],
   "config_flow": true,
   "documentation": "https://github.com/renatobasa88/ezviz_sd_card_recordings",
+  "issue_tracker": "https://github.com/renatobasa88/ezviz_sd_card_recordings",
   "integration_type": "hub",
   "iot_class": "cloud_polling",
   "requirements": [
