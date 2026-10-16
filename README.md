@@ -26,6 +26,13 @@ Uncached clips are queued in the background. A persistent notification shows the
 
 The integration includes local `brand/icon.png` and `brand/dark_icon.png` assets for Home Assistant 2026.3 and newer. Older Home Assistant versions may need the icon registered through the Home Assistant brands repository.
 
+### HACS (Recommended)
+1. Click the button below to add this custom repository to HACS\
+[![Open your Home Assistant instance and open a repository inside the Home Assistant Community Store.](https://my.home-assistant.io/badges/hacs_repository.svg)](https://my.home-assistant.io/redirect/hacs_repository/?category=integration&repository=ezviz_sd_card_recordings&owner=renatobasa88)
+2. Install "Google Find My Device" from HACS
+3. Restart Home Assistant
+4. Add the integration through the UI
+
 ## Install (manual)
 
 1. Copy `custom_components/ezviz_sd_card_recordings` into Home Assistant's `config/custom_components/` directory.
