@@ -1,0 +1,16 @@
+{
+  "domain": "ezviz_sd_card_recordings",
+  "name": "EZVIZ SD Card Recordings",
+  "codeowners": [],
+  "config_flow": true,
+  "documentation": "https://github.com/your-user/ezviz-sd-card-recordings",
+  "integration_type": "hub",
+  "iot_class": "cloud_polling",
+  "requirements": [
+    "pyezvizapi @ https://github.com/adirgan/pyEzvizApi/archive/a7710099624008e113269daed0f7f41e3d0b510e.zip"
+  ],
+  "version": "0.1.12",
+  "dependencies": [
+    "media_source"
+  ]
+}
