@@ -116,34 +116,150 @@ class EzvizArchiveApi:
 
             # EZVIZ expects wall-clock timestamps for the camera/API region;
             # offset-free local date-times match the working pyEzvizApi call.
-            start = datetime.combine(selected_day, time.min).strftime("%Y-%m-%dT%H:%M:%S")
-            stop = datetime.combine(selected_day + timedelta(days=1), time.min).strftime("%Y-%m-%dT%H:%M:%S")
-            payload = client.search_records(
-                serial=api_serial,
-                channel=self.channel,
-                channel_serial=api_serial,
-                start_time=start,
-                stop_time=stop,
-                size=100,
-            )
+            day_start = datetime.combine(selected_day, time.min)
+            day_stop = datetime.combine(selected_day + timedelta(days=1), time.min)
+            # The legacy endpoint accepts a result ``size`` but exposes no
+            # documented offset/page parameter. A full batch of 100 entries is
+            # therefore treated as potentially truncated, and that time window
+            # is queried again in smaller pieces. This is important for busy
+            # cameras: a single 24-hour query can otherwise stop in the middle
+            # of the day and silently hide evening recordings.
+            query_size = 100
+            max_query_calls = 256
+            max_split_depth = 16
+            stats = {
+                "calls": 0,
+                "raw_descriptors": 0,
+                "splits": 0,
+                "saturated_windows": 0,
+                "budget_exhausted": False,
+            }
             extractor = getattr(client, "extract_record_list", None)
-            if callable(extractor):
-                descriptors = extractor(payload)
-            else:
-                descriptors = payload.get("records", []) if isinstance(payload, dict) else []
-            if not isinstance(descriptors, list):
-                raise RuntimeError("EZVIZ returned an unexpected record-list response")
 
+            def extract_descriptors(payload: Any) -> list[Any]:
+                if callable(extractor):
+                    found = extractor(payload)
+                else:
+                    found = payload.get("records", []) if isinstance(payload, dict) else []
+                if not isinstance(found, list):
+                    raise RuntimeError("EZVIZ returned an unexpected record-list response")
+                return found
+
+            def query_interval(
+                interval_start: datetime,
+                interval_stop: datetime,
+                depth: int = 0,
+            ) -> list[Any] | None:
+                """Query one interval, splitting it whenever the result limit is hit.
+
+                ``None`` means the safety call budget prevented this interval from
+                being queried. Parent intervals retain their already fetched
+                descriptors as a fallback so the browser does not go blank.
+                """
+                if stats["calls"] >= max_query_calls:
+                    stats["budget_exhausted"] = True
+                    return None
+
+                stats["calls"] += 1
+                payload = client.search_records(
+                    serial=api_serial,
+                    channel=self.channel,
+                    channel_serial=api_serial,
+                    start_time=interval_start.strftime("%Y-%m-%dT%H:%M:%S"),
+                    stop_time=interval_stop.strftime("%Y-%m-%dT%H:%M:%S"),
+                    size=query_size,
+                )
+                found = extract_descriptors(payload)
+                stats["raw_descriptors"] += len(found)
+
+                # A shorter response is not at the batch ceiling, so it is
+                # considered complete. Exactly 100 is split as well, because
+                # the server may have returned only the first 100 matches.
+                if len(found) < query_size:
+                    return found
+
+                duration_seconds = (interval_stop - interval_start).total_seconds()
+                if depth >= max_split_depth or duration_seconds <= 1:
+                    stats["saturated_windows"] += 1
+                    LOGGER.warning(
+                        "EZVIZ archive result limit may still truncate %s on %s: "
+                        "%d records in %s..%s (split depth %d)",
+                        api_serial,
+                        selected_day,
+                        len(found),
+                        interval_start.strftime("%H:%M:%S"),
+                        interval_stop.strftime("%H:%M:%S"),
+                        depth,
+                    )
+                    return found
+
+                # Keep API timestamps at whole-second precision. Because adjacent
+                # windows meet at the same midpoint, records on the boundary may
+                # be returned twice by inclusive server filters; normalize_records
+                # deduplicates stable descriptor keys after all windows are merged.
+                half_seconds = int(duration_seconds // 2)
+                if half_seconds <= 0:
+                    stats["saturated_windows"] += 1
+                    return found
+                midpoint = interval_start + timedelta(seconds=half_seconds)
+                if midpoint <= interval_start or midpoint >= interval_stop:
+                    stats["saturated_windows"] += 1
+                    return found
+
+                stats["splits"] += 1
+                LOGGER.debug(
+                    "EZVIZ returned the full %d-record batch for %s on %s; "
+                    "splitting %s..%s at %s (depth %d)",
+                    query_size,
+                    api_serial,
+                    selected_day,
+                    interval_start.strftime("%H:%M:%S"),
+                    interval_stop.strftime("%H:%M:%S"),
+                    midpoint.strftime("%H:%M:%S"),
+                    depth,
+                )
+                left = query_interval(interval_start, midpoint, depth + 1)
+                right = query_interval(midpoint, interval_stop, depth + 1)
+
+                # Preserve the current interval's result if the safety budget is
+                # reached below this point. Include any completed child results too;
+                # normalization de-duplicates these overlapping API responses.
+                if left is None or right is None:
+                    fallback = list(found)
+                    if left is not None:
+                        fallback.extend(left)
+                    if right is not None:
+                        fallback.extend(right)
+                    return fallback
+                return left + right
+
+            descriptors = query_interval(day_start, day_stop)
+            if descriptors is None:
+                descriptors = []
             try:
                 local_timezone = ZoneInfo(self.hass.config.time_zone)
             except (ZoneInfoNotFoundError, TypeError):
                 local_timezone = datetime.now().astimezone().tzinfo
             records = normalize_records({"records": descriptors}, local_timezone=local_timezone)
+            if stats["budget_exhausted"]:
+                LOGGER.warning(
+                    "EZVIZ archive query reached its safety limit (%d requests) for %s on %s; "
+                    "the returned list may still be incomplete. Try another refresh if needed.",
+                    max_query_calls,
+                    api_serial,
+                    selected_day,
+                )
             LOGGER.debug(
-                "EZVIZ archive query returned %d records for %s on %s",
-                len(records),
+                "EZVIZ archive query completed for %s on %s: %d normalized records, "
+                "%d raw descriptors across %d API requests (%d adaptive splits, "
+                "%d still-saturated windows)",
                 api_serial,
                 selected_day,
+                len(records),
+                stats["raw_descriptors"],
+                stats["calls"],
+                stats["splits"],
+                stats["saturated_windows"],
             )
             return records
         except Exception as err:
