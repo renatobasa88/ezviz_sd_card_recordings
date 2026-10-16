@@ -1,0 +1,89 @@
+{
+  "title": "EZVIZ SD Card Recordings",
+  "config": {
+    "step": {
+      "user": {
+        "title": "Hubungkan kamera EZVIZ",
+        "description": "Jelajahi rekaman SD card dan unduh tiap klip saat dipilih. Pilih region API sesuai akun EZVIZ. Nomor seri bisa memakai serial lengkap pada stiker atau serial API pendek. Penting: nonaktifkan Video Encryption di aplikasi EZVIZ agar pemutaran rekaman SD card kompatibel.",
+        "data": {
+          "username": "Akun EZVIZ",
+          "password": "Kata sandi",
+          "region": "Region API EZVIZ",
+          "serial": "Nomor seri kamera (serial stiker lengkap atau serial API pendek)",
+          "camera_name": "Nama di Media Browser",
+          "channel": "Channel kamera"
+        }
+      },
+      "mfa": {
+        "title": "Verifikasi akun EZVIZ",
+        "description": "Masukkan kode sekali pakai yang dikirim EZVIZ ke {username}.",
+        "data": {
+          "sms_code": "Kode verifikasi"
+        }
+      },
+      "region": {
+        "title": "Masukkan region API EZVIZ khusus",
+        "description": "Masukkan hanya hostname API, misalnya apiisgp.ezvizlife.com. Jangan sertakan https:// atau path.",
+        "data": {
+          "custom_region": "Hostname API"
+        }
+      }
+    },
+    "error": {
+      "invalid_auth": "Akun atau kata sandi ditolak EZVIZ.",
+      "cannot_connect": "Tidak dapat terhubung ke layanan EZVIZ.",
+      "mfa_required": "Kode verifikasi ditolak. Coba lagi.",
+      "unknown": "Autentikasi gagal. Periksa hostname region dan log Home Assistant."
+    },
+    "abort": {
+      "already_configured": "Akun/kamera ini sudah dikonfigurasi."
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "Konfigurasi media",
+        "menu_options": {
+          "configure_media": "Konfigurasi Media",
+          "delete_cache": "Hapus semua cache dan rekaman"
+        }
+      },
+      "configure_media": {
+        "title": "Konfigurasi Media",
+        "description": "Atur urutan tanggal dan rekaman. Media Sync secara default Off. Jika diaktifkan, integrasi memeriksa rekaman baru setiap 15 menit dan mengunduh rekaman dalam rentang waktu yang dipilih. Video dan thumbnail cache disimpan di .storage/ezviz_sd_card_recordings/<entry_id> secara default. Isi Cold storage path di luar folder config (misalnya /media/ezviz_sd_card_recordings/kamera_depan) agar backup tidak membesar.",
+        "data": {
+          "order_days": "Urutan hari di Media Browser",
+          "order_recordings": "Urutan rekaman di Media Browser",
+          "media_sync": "Media Sync"
+        }
+      },
+      "delete_cache": {
+        "title": "Hapus semua cache dan rekaman",
+        "description": "Hapus semua video dan thumbnail yang dicache secara lokal untuk kamera ini. Rekaman pada kartu SD fisik kamera tidak dihapus. Tindakan ini tidak dapat dibatalkan.",
+        "data": {
+          "confirm": "Saya paham: hapus semua video dan thumbnail cache"
+        }
+      },
+      "sync_window": {
+        "title": "Pengaturan Media Sync",
+        "description": "Pilih sinkronisasi otomatis agar 24 jam terakhir selalu diperbarui, atau rentang berjalan manual 1–168 jam. Sinkronisasi berjalan setiap 15 menit. Cold storage path bersifat opsional; kosongkan untuk memakai cache privat default.",
+        "data": {
+          "sync_mode": "Rentang sinkronisasi",
+          "cold_storage_path": "Cold storage path"
+        }
+      },
+      "sync_hours": {
+        "title": "Rentang sinkronisasi manual",
+        "description": "Masukkan jumlah jam terbaru yang ingin disimpan di cache. Rekaman baru dalam rentang ini akan terambil otomatis saat pemeriksaan tiap 15 menit. Maksimum: 168 jam (7 hari).",
+        "data": {
+          "sync_hours": "Jumlah jam yang disinkronkan"
+        }
+      }
+    },
+    "error": {
+      "invalid_path": "Masukkan lokasi filesystem absolut.",
+      "path_in_use": "Cold storage path ini sudah digunakan kamera lain.",
+      "invalid_hours": "Masukkan angka antara 1 sampai 168 jam."
+    }
+  }
+}
