@@ -10,6 +10,7 @@ import re
 import shutil
 import subprocess
 import tempfile
+import threading
 import time as time_module
 from datetime import date, datetime, time, timedelta
 from importlib.metadata import PackageNotFoundError, version as package_version
@@ -40,28 +41,22 @@ from .recordings import (
 class EzvizArchiveApi:
     """Query EZVIZ SD-card record descriptors through pyEzvizApi."""
 
-    # Faster retry policy: the transient 2004/70 device exception usually
-    # resolves in a couple of seconds, or not at all. Long retries just make
-    # the media browser feel broken. The cooldown below handles the "not at
-    # all" case without hammering the cloud.
     DEVICE_EXCEPTION_RETRIES = 2
-    DEVICE_EXCEPTION_BASE_DELAY = 3  # seconds
-    # After a full-day failure, pause that day for this long so the browser
-    # and Media Sync don't spam the cloud while the camera is unreachable.
+    DEVICE_EXCEPTION_BASE_DELAY = 3
     FAILURE_COOLDOWN = timedelta(minutes=10)
-    # Safety net for pathological cameras; the single-query design means a
-    # normal day only ever uses 1-3 calls.
     MAX_QUERY_CALLS = 32
     MAX_SPLIT_DEPTH = 8
-    # EZVIZ's cloud endpoint caps every ``search_records`` response at 50
-    # descriptors and silently ignores the ``size`` parameter, even when the
-    # caller asks for 100 or 500. A response that reaches this cap must be
-    # treated as truncated and split into smaller time windows; otherwise
-    # evening recordings are silently hidden. Verified against C6N and H8c
-    # on 2026-10-16: querying 00:00-24:00 returned exactly 50 records
-    # stopping around 11:18, while splitting the day correctly surfaced
-    # recordings until 23:08.
     RESULT_BATCH_SIZE = 50
+    VTM_RETRY_ATTEMPTS = 2
+    VTM_RETRY_BASE_DELAY = 10
+    VTM_SESSION_COOLDOWN = 4
+    REMUX_RETRY_CYCLES = 2
+    REMUX_EXPAND_START_SECONDS = 30
+    # VTM cloud client profile. Type 3 is the value that has been verified
+    # to work reliably across H8c and C6N cameras in the Singapore region.
+    # Type 4 sometimes delivers incomplete slices or fails to bootstrap.
+    # decrypt_video must remain False: True makes save_clip fail outright.
+    VTM_CLOUD_CLIENT_TYPE = 3
 
     def __init__(self, hass: HomeAssistant, entry: ConfigEntry) -> None:
         self.hass = hass
@@ -69,12 +64,14 @@ class EzvizArchiveApi:
         self.serial = str(entry.data[CONF_SERIAL])
         self.channel = int(entry.data.get(CONF_CHANNEL, 1))
         self.region = str(entry.data.get(CONF_REGION, "apiieu.ezvizlife.com"))
-        self.username = str(entry.data[CONF_USERNAME])
+        self.username = str(entry.data.get(CONF_USERNAME))
         self.password = str(entry.data[CONF_PASSWORD])
         self._lock = asyncio.Lock()
         self._cache: dict[date, tuple[datetime, list[dict[str, Any]]]] = {}
         self._cache_ttl = timedelta(minutes=5)
         self._failure_cooldown: dict[date, datetime] = {}
+        self._vtm_lock = threading.Lock()
+        self._vtm_last_attempt = 0.0
         self.token_path = Path(
             hass.config.path(".storage", DOMAIN, entry.entry_id, "token.json")
         )
@@ -119,9 +116,6 @@ class EzvizArchiveApi:
         async with self._lock:
             now = datetime.now().astimezone()
 
-            # Honour the cooldown after a total failure so repeated browser
-            # refreshes or Media Sync runs don't spam the EZVIZ cloud while
-            # the camera is clearly unreachable.
             cooldown_until = self._failure_cooldown.get(selected_day)
             if cooldown_until and now < cooldown_until:
                 remaining = int((cooldown_until - now).total_seconds())
@@ -148,20 +142,7 @@ class EzvizArchiveApi:
             return records
 
     def _query_day(self, selected_day: date) -> list[dict[str, Any]]:
-        """Query the legacy ``search_records`` endpoint for one day.
-
-        Design:
-        * Single query per day. ``query_interval`` recursively splits only
-          when a batch comes back full (or ``isFinished`` is explicitly
-          False), so a normal day is one API call.
-        * For today, the requested range is clamped to ``now``. Querying
-          future windows always fails with 2004/70 because the camera has
-          not recorded anything for a time that has not happened yet.
-        * Transient 2004/70 failures are retried a small number of times
-          and then treated as a hard failure for the whole day. Since there
-          is only one window now, partial-failure heuristics would only add
-          complexity without improving the outcome.
-        """
+        """Query the legacy ``search_records`` endpoint for one day."""
         self._ensure_token_file()
         from pyezvizapi.client import EzvizClient
 
@@ -193,7 +174,6 @@ class EzvizArchiveApi:
             is_today_or_future = selected_day >= today
 
             if selected_day > today:
-                # Future day; there is nothing to query.
                 return []
 
             if is_today_or_future:
@@ -364,10 +344,6 @@ class EzvizArchiveApi:
                     field_names,
                 )
 
-                # ``isFinished`` from the server is the authoritative signal
-                # for "no more batches". If it is explicitly False, we must
-                # split even when len < batch size, because the server is
-                # telling us there is more data.
                 is_finished: bool | None = None
                 if isinstance(payload, dict):
                     is_finished = payload.get("isFinished")
@@ -546,10 +522,380 @@ class EzvizArchiveApi:
             pass
         return total
 
+    def _open_vtm_session(
+        self,
+        client: "EzvizClient",
+        api_serial: str,
+        ps_path: Path,
+        begin_time: str,
+        end_time: str,
+    ) -> bool:
+        """Open one VTM session and stream it into ``ps_path`` as MPEG-PS.
+
+        MPEG-PS is the only output format ``save_clip`` supports for
+        cloud-playback. Returns True when the session ended with the known
+        "VTM socket closed while reading packet" EOF condition after writing
+        media. Transient VTM errors are retried up to ``VTM_RETRY_ATTEMPTS``
+        times with linear backoff; the final failure propagates.
+        """
+        from pyezvizapi.exceptions import PyEzvizError
+
+        save_clip = getattr(client, "save_clip", None)
+        if not callable(save_clip):
+            raise RuntimeError(
+                "Installed pyEzvizApi does not include save_clip(); "
+                "the native SD-card playback dependency was not installed correctly."
+            )
+
+        required_parameters = {
+            "source",
+            "cloud_playback_begin_time",
+            "cloud_playback_end_time",
+        }
+        try:
+            save_parameters = set(inspect.signature(save_clip).parameters)
+        except (TypeError, ValueError):
+            save_parameters = set()
+        missing_parameters = sorted(required_parameters - save_parameters)
+        if missing_parameters:
+            try:
+                installed_version = package_version("pyezvizapi")
+            except PackageNotFoundError:
+                installed_version = "unknown"
+            try:
+                loaded_from = inspect.getfile(type(client))
+            except (TypeError, OSError):
+                loaded_from = "unknown location"
+            raise RuntimeError(
+                "Incompatible pyEzvizApi build loaded: "
+                f"version={installed_version}, path={loaded_from}, "
+                f"missing save_clip parameters={', '.join(missing_parameters)}. "
+                "This integration requires the cloud-playback commit "
+                "a7710099624008e113269daed0f7f41e3d0b510e."
+            )
+
+        with self._vtm_lock:
+            last_error: Exception | None = None
+
+            for attempt in range(self.VTM_RETRY_ATTEMPTS):
+                elapsed = time_module.monotonic() - self._vtm_last_attempt
+                if elapsed < self.VTM_SESSION_COOLDOWN:
+                    wait = self.VTM_SESSION_COOLDOWN - elapsed
+                    LOGGER.debug(
+                        "Waiting %.1fs before opening a new VTM session "
+                        "for camera %s",
+                        wait,
+                        api_serial,
+                    )
+                    time_module.sleep(wait)
+                self._vtm_last_attempt = time_module.monotonic()
+
+                try:
+                    save_clip(
+                        api_serial,
+                        ps_path,
+                        source="cloud-playback",
+                        output_format="mpegps",
+                        channel=self.channel,
+                        cloud_client_type=self.VTM_CLOUD_CLIENT_TYPE,
+                        decrypt_video=False,
+                        cloud_playback_begin_time=begin_time,
+                        cloud_playback_end_time=end_time,
+                        timeout=30.0,
+                    )
+                    size = ps_path.stat().st_size if ps_path.exists() else 0
+                    if size <= 0:
+                        raise RuntimeError(
+                            "EZVIZ save_clip returned without producing media"
+                        )
+                    last_error = None
+                    return False
+                except Exception as err:
+                    partial_size = ps_path.stat().st_size if ps_path.exists() else 0
+                    if (
+                        isinstance(err, PyEzvizError)
+                        and str(err) == "VTM socket closed while reading packet"
+                        and partial_size > 0
+                    ):
+                        LOGGER.debug(
+                            "EZVIZ VTM socket closed after writing %d bytes; "
+                            "validating media before accepting EOF",
+                            partial_size,
+                        )
+                        return True
+
+                    last_error = err
+                    if attempt >= self.VTM_RETRY_ATTEMPTS - 1:
+                        break
+
+                    delay = (attempt + 1) * self.VTM_RETRY_BASE_DELAY
+                    LOGGER.warning(
+                        "EZVIZ save_clip failed on attempt %d/%d "
+                        "for %s: %s; retrying in %ds",
+                        attempt + 1,
+                        self.VTM_RETRY_ATTEMPTS,
+                        api_serial,
+                        self._sanitize_diagnostic(str(err)) or type(err).__name__,
+                        delay,
+                    )
+                    ps_path.unlink(missing_ok=True)
+                    time_module.sleep(delay)
+
+            if last_error is not None:
+                raise last_error
+            return False
+
+    @staticmethod
+    def _find_start_code_offset(
+        path: Path, max_scan: int = 16 * 1024 * 1024
+    ) -> int:
+        """Find offset of first MPEG start code (00 00 01) in file.
+
+        Scans up to ``max_scan`` bytes. Returns -1 if not found. Handles
+        start codes that straddle the 1 MiB chunk boundary by keeping the
+        last 2 bytes of each chunk as a tail.
+        """
+        try:
+            with path.open("rb") as handle:
+                absolute = 0
+                tail = b""
+                while absolute < max_scan:
+                    chunk = handle.read(1024 * 1024)
+                    if not chunk:
+                        break
+                    window = tail + chunk
+                    idx = window.find(b"\x00\x00\x01")
+                    if idx >= 0:
+                        return absolute - len(tail) + idx
+                    tail = window[-2:]
+                    absolute += len(chunk)
+        except OSError:
+            pass
+        return -1
+
+    def _strip_prefix_to_start_code(self, path: Path) -> bool:
+        """Strip bytes before the first MPEG start code.
+
+        VTM frequently writes a handshake preamble before the actual
+        MPEG-PS pack header. FFmpeg's demuxer then complains "No start
+        code is found" and refuses to process anything. Removing that
+        prefix turns the file into a valid PS stream.
+
+        Returns True if the file was modified.
+        """
+        offset = self._find_start_code_offset(path)
+        if offset <= 0:
+            return False
+        try:
+            with path.open("rb") as src:
+                src.seek(offset)
+                payload = src.read()
+            with path.open("wb") as dst:
+                dst.write(payload)
+            LOGGER.info(
+                "EZVIZ stripped %d-byte prefix before first MPEG start code in %s",
+                offset,
+                path.name,
+            )
+            return True
+        except OSError as err:
+            LOGGER.warning(
+                "Could not strip prefix from %s (%s)", path.name, err
+            )
+            return False
+
+    def _remux_to_mp4(
+        self,
+        ffmpeg: str,
+        ps_path: Path,
+        mp4_path: Path,
+    ) -> None:
+        """Remux an MPEG-PS stream into a playable MP4.
+
+        Philosophy: **preserve the original video, do not re-encode unless
+        there is no other way.**
+
+        EZVIZ VTM streams are frequently incomplete — missing slices show
+        up as green blocks in the bottom third or quarter of the frame.
+        Transcoding to H.264 does not fix that missing data; it merely
+        re-encodes the green blocks into a permanent artefact and adds a
+        second layer of lossy compression on top of the intact parts of
+        the frame. Users have reported that the raw HEVC played in VLC
+        looks noticeably better than the transcoded H.264 result, which
+        is consistent: VLC's decoder conceals missing slices more
+        gracefully (freeze frame) than FFmpeg's default green fill, and
+        the copy path retains the original HEVC bitstream untouched.
+
+        Strategy order, best-quality first:
+
+        1. ``copy+audio-aac``: copy HEVC video byte-for-byte, transcode
+           MP2 audio to AAC. Fast, preserves original video quality.
+        2. ``copy+silent``: copy HEVC video, drop audio if it cannot be
+           decoded. Fast, preserves original video quality.
+        3. ``transcode-h264-aac``: only reached when copy fails at the
+           demux level. Re-encodes video to H.264 for browser
+           compatibility at the cost of quality.
+        4. ``transcode-h264-silent``: last resort, H.264 with no audio.
+
+        Consequence: most recordings will be HEVC-in-MP4. Browsers cannot
+        play HEVC, so Home Assistant's Media Browser will show a blank
+        page. That is expected. Users should download the file and open
+        it in a native player (VLC, mpv, etc.) that supports HEVC.
+        This trade-off is intentional: HEVC-in-MP4 preserves quality,
+        H.264-in-MP4 plays in browsers but degrades the image.
+
+        ``-ec 0`` is only relevant to the transcode fallback: it stops
+        FFmpeg's decoder from patching corrupt slices with green pixels
+        during the decode-for-transcode step. In copy mode there is no
+        decoding, so the flag has no effect on the output file.
+
+        Each strategy is tried against several demuxers (mpeg, h264,
+        hevc, mpegts, auto) so a stream that is actually a raw elementary
+        stream still parses.
+        """
+        # Diagnose: log the first 32 bytes so a failed remux can be
+        # distinguished from a corrupt VTM response by looking at the log.
+        try:
+            with ps_path.open("rb") as handle:
+                head = handle.read(32)
+            if head:
+                LOGGER.info(
+                    "EZVIZ raw stream %s first 32 bytes: %s",
+                    ps_path.name,
+                    head.hex(),
+                )
+        except OSError:
+            pass
+
+        # Strip any handshake prefix before the first start code.
+        self._strip_prefix_to_start_code(ps_path)
+
+        demuxer_formats: list[str | None] = [
+            "mpeg",
+            "h264",
+            "hevc",
+            "mpegts",
+            None,
+        ]
+
+        strategies: list[tuple[str, list[str]]] = [
+            # 1) Primary: copy video, transcode audio. Fast and lossless on
+            #    the video side. Output is HEVC-in-MP4; browser playback is
+            #    not expected, users should download and use a native player.
+            (
+                "copy+audio-aac",
+                [
+                    "-c:v", "copy",
+                    "-map", "0:a?",
+                    "-c:a", "aac",
+                    "-b:a", "128k",
+                ],
+            ),
+            # 2) Copy video, drop audio if the audio track cannot decode.
+            (
+                "copy+silent",
+                ["-c:v", "copy", "-an"],
+            ),
+            # 3) Fallback: transcode video to H.264 for browser playback.
+            #    Only reached when copy fails at the demux level.
+            (
+                "transcode-h264-aac",
+                [
+                    "-c:v", "libx264",
+                    "-preset", "veryfast",
+                    "-crf", "23",
+                    "-threads", "0",
+                    "-tag:v", "avc1",
+                    "-pix_fmt", "yuv420p",
+                    "-map", "0:a?",
+                    "-c:a", "aac",
+                    "-b:a", "128k",
+                ],
+            ),
+            # 4) Last resort: H.264 without audio.
+            (
+                "transcode-h264-silent",
+                [
+                    "-c:v", "libx264",
+                    "-preset", "veryfast",
+                    "-crf", "23",
+                    "-threads", "0",
+                    "-tag:v", "avc1",
+                    "-pix_fmt", "yuv420p",
+                    "-an",
+                ],
+            ),
+        ]
+
+        last_stderr = ""
+        for demuxer in demuxer_formats:
+            fmt_args = ["-f", demuxer] if demuxer else []
+            input_opts = [
+                # Disable error concealment: when the transcode fallback
+                # actually runs, corrupted slices become black/frozen
+                # instead of bright green.
+                "-ec", "0",
+                "-fflags", "+genpts+discardcorrupt+igndts",
+                "-err_detect", "ignore_err",
+                "-analyzeduration", "500M",
+                "-probesize", "500M",
+                *fmt_args,
+            ]
+            for label, out_args in strategies:
+                full_label = f"{(demuxer or 'auto')}-{label}"
+                command = [
+                    ffmpeg, "-y", "-hide_banner", "-loglevel", "error",
+                    *input_opts,
+                    "-i", str(ps_path),
+                    "-map", "0:v?",
+                    "-movflags", "+faststart",
+                    "-max_muxing_queue_size", "1024",
+                    *out_args,
+                    str(mp4_path),
+                ]
+                try:
+                    process = subprocess.run(
+                        command,
+                        check=False,
+                        capture_output=True,
+                        text=True,
+                        timeout=600,
+                    )
+                except (OSError, subprocess.SubprocessError) as err:
+                    last_stderr = f"{type(err).__name__}: {err}"
+                    mp4_path.unlink(missing_ok=True)
+                    continue
+
+                produced = mp4_path.exists() and mp4_path.stat().st_size > 0
+                if process.returncode == 0 and produced:
+                    LOGGER.info(
+                        "EZVIZ remux succeeded using %s strategy", full_label
+                    )
+                    return
+
+                last_stderr = (process.stderr or "").strip()
+                mp4_path.unlink(missing_ok=True)
+                LOGGER.debug(
+                    "EZVIZ remux attempt %s failed (rc=%d): %s",
+                    full_label,
+                    process.returncode,
+                    self._sanitize_diagnostic(last_stderr)[:200]
+                    or "(no stderr)",
+                )
+
+        detail = self._sanitize_diagnostic(last_stderr or "FFmpeg failed")
+        raise RuntimeError(f"Could not remux EZVIZ playback to MP4: {detail}")
+
     def _download_native_record(
         self, record: dict[str, Any], destination: Path
     ) -> None:
-        """Blocking native EZVIZ SD-card playback download implementation."""
+        """Blocking native EZVIZ SD-card playback download implementation.
+
+        A failed remux (usually because the HEVC stream started mid-GOP and
+        the parameter sets are missing) triggers a second VTM cycle with the
+        start time expanded by ``REMUX_EXPAND_START_SECONDS``. This includes
+        the previous GOP so the SPS/PPS packets are captured.
+        """
         self._ensure_token_file()
         try:
             token = json.loads(self.token_path.read_text(encoding="utf-8"))
@@ -582,200 +928,175 @@ class EzvizArchiveApi:
             playback_timezone = datetime.now().astimezone().tzinfo
         if playback_timezone is None:
             playback_timezone = start.tzinfo
-        begin_time = format_native_playback_timestamp(start, playback_timezone)
-        end_time = format_native_playback_timestamp(end, playback_timezone)
 
         from pyezvizapi.client import EzvizClient
 
         destination.parent.mkdir(parents=True, exist_ok=True)
-        fd_ps, ps_name = tempfile.mkstemp(
-            prefix=f".ezviz-native-{destination.stem}-",
-            suffix=".ps",
-            dir=destination.parent,
-        )
-        os.close(fd_ps)
-        fd_mp4, mp4_name = tempfile.mkstemp(
-            prefix=f".ezviz-remux-{destination.stem}-",
-            suffix=".mp4",
-            dir=destination.parent,
-        )
-        os.close(fd_mp4)
-        ps_path = Path(ps_name)
-        mp4_path = Path(mp4_name)
         client = None
+        ps_path: Path | None = None
+        mp4_path: Path | None = None
+        eof_after_media = False
+        last_cycle_error: Exception | None = None
+        output_size = 0
+
         try:
             client = EzvizClient(token=token, url=self.region)
             device_records = client.get_device_records()
             api_serial = resolve_api_serial(self.serial, device_records.keys())
-            save_clip = getattr(client, "save_clip", None)
-            if not callable(save_clip):
-                raise RuntimeError(
-                    "Installed pyEzvizApi does not include save_clip(); "
-                    "the native SD-card playback dependency was not "
-                    "installed correctly."
-                )
 
-            required_parameters = {
-                "source",
-                "cloud_playback_begin_time",
-                "cloud_playback_end_time",
-            }
-            try:
-                save_parameters = set(
-                    inspect.signature(save_clip).parameters
-                )
-            except (TypeError, ValueError):
-                save_parameters = set()
-            missing_parameters = sorted(required_parameters - save_parameters)
-            if missing_parameters:
-                try:
-                    installed_version = package_version("pyezvizapi")
-                except PackageNotFoundError:
-                    installed_version = "unknown"
-                try:
-                    loaded_from = inspect.getfile(type(client))
-                except (TypeError, OSError):
-                    loaded_from = "unknown location"
-                raise RuntimeError(
-                    "Incompatible pyEzvizApi build loaded: "
-                    f"version={installed_version}, path={loaded_from}, "
-                    f"missing save_clip parameters="
-                    f"{', '.join(missing_parameters)}. "
-                    "This integration requires the cloud-playback commit "
-                    "a7710099624008e113269daed0f7f41e3d0b510e. "
-                    "Restart Home Assistant after updating the integration "
-                    "requirements; if it persists, force-install the pinned "
-                    "archive inside the HA container."
-                )
+            for cycle in range(self.REMUX_RETRY_CYCLES):
+                if ps_path is not None:
+                    ps_path.unlink(missing_ok=True)
+                if mp4_path is not None:
+                    mp4_path.unlink(missing_ok=True)
 
-            eof_after_media = False
-            try:
-                save_clip(
-                    api_serial,
-                    ps_path,
-                    source="cloud-playback",
-                    output_format="mpegps",
-                    channel=self.channel,
-                    cloud_client_type=3,
-                    decrypt_video=False,
-                    cloud_playback_begin_time=begin_time,
-                    cloud_playback_end_time=end_time,
-                    timeout=30.0,
+                fd_ps, ps_name = tempfile.mkstemp(
+                    prefix=f".ezviz-native-{destination.stem}-",
+                    suffix=".ps",
+                    dir=destination.parent,
                 )
-            except Exception as err:
-                from pyezvizapi.exceptions import PyEzvizError
+                os.close(fd_ps)
+                fd_mp4, mp4_name = tempfile.mkstemp(
+                    prefix=f".ezviz-remux-{destination.stem}-",
+                    suffix=".mp4",
+                    dir=destination.parent,
+                )
+                os.close(fd_mp4)
+                ps_path = Path(ps_name)
+                mp4_path = Path(mp4_name)
 
-                partial_size = ps_path.stat().st_size if ps_path.exists() else 0
-                if (
-                    isinstance(err, PyEzvizError)
-                    and str(err) == "VTM socket closed while reading packet"
-                    and partial_size > 0
-                ):
-                    eof_after_media = True
-                    LOGGER.debug(
-                        "EZVIZ VTM socket closed after writing %d bytes; "
-                        "validating media before accepting EOF",
-                        partial_size,
-                    )
+                if cycle == 0:
+                    attempt_start = start
                 else:
-                    raise
-            size = ps_path.stat().st_size if ps_path.exists() else 0
-            if size <= 0:
-                raise RuntimeError(
-                    "EZVIZ playback returned an empty native media stream"
-                )
-            if size > 2 * 1024 * 1024 * 1024:
-                raise RuntimeError(
-                    "The selected recording exceeds the 2 GiB safety limit"
-                )
+                    attempt_start = start - timedelta(
+                        seconds=self.REMUX_EXPAND_START_SECONDS
+                    )
+                    LOGGER.info(
+                        "Retrying VTM for %s with start expanded by %ds "
+                        "to capture HEVC parameter sets",
+                        api_serial,
+                        self.REMUX_EXPAND_START_SECONDS,
+                    )
 
-            process = subprocess.run(
-                [
-                    ffmpeg,
-                    "-y",
-                    "-hide_banner",
-                    "-loglevel",
-                    "error",
-                    "-fflags",
-                    "+genpts",
-                    "-f",
-                    "mpeg",
-                    "-i",
-                    str(ps_path),
-                    "-map",
-                    "0:v?",
-                    "-map",
-                    "0:a?",
-                    "-c",
-                    "copy",
-                    "-movflags",
-                    "+faststart",
-                    str(mp4_path),
-                ],
-                check=False,
-                capture_output=True,
-                text=True,
-                timeout=180,
-            )
-            if process.returncode != 0:
-                detail = self._sanitize_diagnostic(
-                    process.stderr or "FFmpeg failed"
+                begin_time = format_native_playback_timestamp(
+                    attempt_start, playback_timezone
                 )
+                end_time = format_native_playback_timestamp(end, playback_timezone)
+
+                try:
+                    eof_after_media = self._open_vtm_session(
+                        client, api_serial, ps_path, begin_time, end_time
+                    )
+
+                    size = ps_path.stat().st_size if ps_path.exists() else 0
+                    if size <= 0:
+                        raise RuntimeError(
+                            "EZVIZ playback returned an empty native media stream"
+                        )
+                    if size > 2 * 1024 * 1024 * 1024:
+                        raise RuntimeError(
+                            "The selected recording exceeds the 2 GiB safety limit"
+                        )
+
+                    self._remux_to_mp4(ffmpeg, ps_path, mp4_path)
+
+                    output_size = (
+                        mp4_path.stat().st_size if mp4_path.exists() else 0
+                    )
+                    if output_size <= 0:
+                        raise RuntimeError(
+                            "FFmpeg completed without producing a playable MP4"
+                        )
+
+                    last_cycle_error = None
+                    break
+                except Exception as err:
+                    last_cycle_error = err
+                    LOGGER.warning(
+                        "EZVIZ download cycle %d/%d for %s failed (%s): %s",
+                        cycle + 1,
+                        self.REMUX_RETRY_CYCLES,
+                        api_serial,
+                        type(err).__name__,
+                        self._sanitize_diagnostic(str(err))
+                        or "(no detail)",
+                    )
+                    if cycle + 1 >= self.REMUX_RETRY_CYCLES:
+                        raise
+                    time_module.sleep(5)
+
+            if last_cycle_error is not None:
+                raise last_cycle_error
+            if mp4_path is None or not mp4_path.exists():
                 raise RuntimeError(
-                    f"Could not remux EZVIZ playback to MP4: {detail}"
-                )
-            output_size = mp4_path.stat().st_size if mp4_path.exists() else 0
-            if output_size <= 0:
-                raise RuntimeError(
-                    "FFmpeg completed without producing a playable MP4"
+                    "EZVIZ download did not produce an MP4 after retries"
                 )
 
             if eof_after_media:
-                ffprobe = shutil.which("ffprobe")
-                if ffprobe:
-                    probe = subprocess.run(
-                        [
-                            ffprobe,
-                            "-v",
-                            "error",
-                            "-show_entries",
-                            "format=duration",
-                            "-of",
-                            "default=noprint_wrappers=1:nokey=1",
-                            str(mp4_path),
-                        ],
-                        check=False,
-                        capture_output=True,
-                        text=True,
-                        timeout=30,
-                    )
-                    try:
-                        actual_duration = float(probe.stdout.strip())
-                    except (TypeError, ValueError):
-                        actual_duration = 0.0
-                    expected_duration = (end - start).total_seconds()
-                    required_duration = max(1.0, expected_duration * 0.7)
-                    if (
-                        probe.returncode != 0
-                        or actual_duration < required_duration
-                    ):
-                        raise RuntimeError(
-                            "VTM closed after writing media, but the "
-                            "remuxed recording is too short "
-                            f"({actual_duration:.2f}s; expected about "
-                            f"{expected_duration:.2f}s)"
-                        )
+                expected_duration = (end - start).total_seconds()
+
+                if expected_duration < 60:
                     LOGGER.info(
-                        "Accepted VTM EOF after validating %.2f-second "
-                        "recording (expected %.2f seconds)",
-                        actual_duration,
+                        "Skipping duration validation for short recording "
+                        "(%.1fs expected); accepting non-empty remux",
                         expected_duration,
                     )
                 else:
-                    LOGGER.warning(
-                        "ffprobe is unavailable; accepting VTM EOF after "
-                        "successful FFmpeg remux"
-                    )
+                    ffprobe = shutil.which("ffprobe")
+                    if ffprobe:
+                        if expected_duration < 120:
+                            required_duration = max(
+                                1.0, expected_duration * 0.5
+                            )
+                        else:
+                            required_duration = max(
+                                1.0, expected_duration * 0.7
+                            )
+                        probe = subprocess.run(
+                            [
+                                ffprobe,
+                                "-v",
+                                "error",
+                                "-show_entries",
+                                "format=duration",
+                                "-of",
+                                "default=noprint_wrappers=1:nokey=1",
+                                str(mp4_path),
+                            ],
+                            check=False,
+                            capture_output=True,
+                            text=True,
+                            timeout=30,
+                        )
+                        try:
+                            actual_duration = float(probe.stdout.strip())
+                        except (TypeError, ValueError):
+                            actual_duration = 0.0
+                        if (
+                            probe.returncode != 0
+                            or actual_duration < required_duration
+                        ):
+                            raise RuntimeError(
+                                "VTM closed after writing media, but the "
+                                "remuxed recording is too short "
+                                f"({actual_duration:.2f}s; expected about "
+                                f"{expected_duration:.2f}s, required "
+                                f"{required_duration:.2f}s)"
+                            )
+                        LOGGER.info(
+                            "Accepted VTM EOF after validating %.2f-second "
+                            "recording (expected %.2f seconds, required "
+                            "%.2f seconds)",
+                            actual_duration,
+                            expected_duration,
+                            required_duration,
+                        )
+                    else:
+                        LOGGER.warning(
+                            "ffprobe is unavailable; accepting VTM EOF after "
+                            "successful FFmpeg remux"
+                        )
+
             os.replace(mp4_path, destination)
             try:
                 os.chmod(destination, 0o640)
@@ -798,8 +1119,10 @@ class EzvizArchiveApi:
                 "for details"
             ) from err
         finally:
-            ps_path.unlink(missing_ok=True)
-            mp4_path.unlink(missing_ok=True)
+            if ps_path is not None:
+                ps_path.unlink(missing_ok=True)
+            if mp4_path is not None:
+                mp4_path.unlink(missing_ok=True)
             if client is not None:
                 try:
                     client.close_session()
