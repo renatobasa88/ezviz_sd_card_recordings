@@ -69,7 +69,7 @@
         "description": "Choose automatic sync to keep the latest 24 hours up to date, or a custom rolling window of 1–168 hours. Synchronization runs every 15 minutes. Cold storage path is optional; leave it empty to use the default private cache.",
         "data": {
           "sync_mode": "Synchronization window",
-          "cold_storage_path": "Cold storage path"
+          "cold_storage_path": "Cold storage path (Optional)"
         }
       },
       "sync_hours": {
