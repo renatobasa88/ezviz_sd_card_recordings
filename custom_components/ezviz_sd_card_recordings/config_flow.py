@@ -44,6 +44,10 @@ from .recordings import serial_identity
 REGION_OPTIONS = [
     {"label": "Singapore / Asia — apiisgp.ezvizlife.com", "value": "apiisgp.ezvizlife.com"},
     {"label": "Europe — apiieu.ezvizlife.com", "value": "apiieu.ezvizlife.com"},
+    {"label": "South America — apiisa.ezvizlife.com", "value": "apiisa.ezvizlife.com"},
+    {"label": "North America / US — apiius.ezvizlife.com", "value": "apiius.ezvizlife.com"},
+    {"label": "India — apiiindia.ezvizlife.com", "value": "apiiindia.ezvizlife.com"},
+    {"label": "China — api.ys7.com", "value": "api.ys7.com"},
     {"label": "Other region — enter hostname manually", "value": "custom"},
 ]
 _ORDER_OPTIONS = [
