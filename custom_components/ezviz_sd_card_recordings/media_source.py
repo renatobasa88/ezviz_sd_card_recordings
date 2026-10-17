@@ -406,7 +406,13 @@ class EzvizMediaSource(MediaSource):
                 await self.async_sync_entry(entry_id)
 
     async def async_sync_entry(self, entry_id: str) -> None:
-        """Cache recordings in the configured rolling time window for one camera."""
+        """Cache recordings in the configured rolling time window for one camera.
+
+        The loop tolerates per-day failures: if one day fails (camera busy,
+        cloud index lagging for today, or the day is in api.py's cooldown
+        window), the loop logs and continues with the remaining days instead
+        of aborting the whole sync window.
+        """
         if entry_id in self._syncing:
             return
         self._syncing.add(entry_id)
@@ -426,8 +432,23 @@ class EzvizMediaSource(MediaSource):
             first_day = cutoff.date()
             day = first_day
             attempted = completed = 0
+            skipped_days: list[date] = []
+
             while day <= now.date():
-                records = await api.async_records_for_day(day)
+                try:
+                    records = await api.async_records_for_day(day)
+                except RuntimeError as err:
+                    # A single failed day must not abort the whole sync.
+                    # The camera may be busy, the cloud index may lag for
+                    # today, or the day may be in api.py's cooldown window.
+                    skipped_days.append(day)
+                    LOGGER.debug(
+                        "EZVIZ media sync skipped %s for %s: %s",
+                        day, entry.title, err,
+                    )
+                    day += timedelta(days=1)
+                    continue
+
                 for record in records:
                     if record["end"] < cutoff or record["start"] > now:
                         continue
@@ -438,14 +459,39 @@ class EzvizMediaSource(MediaSource):
                     if await self._async_download_record(entry, api, record, destination, day):
                         completed += 1
                 day += timedelta(days=1)
+
             if attempted:
-                persistent_notification.async_create(
-                    self.hass,
-                    f"Recent-recording synchronization finished. Cached {completed} of {attempted} missing recordings in the last {hours} hours.",
-                    title=f"{entry.title}: media synchronization", notification_id=f"{DOMAIN}_sync_{entry_id}",
+                message = (
+                    f"Recent-recording synchronization finished. Cached "
+                    f"{completed} of {attempted} missing recordings in the "
+                    f"last {hours} hours."
                 )
+            elif skipped_days:
+                message = (
+                    f"Recent-recording synchronization finished without new "
+                    f"downloads. {len(skipped_days)} day(s) could not be "
+                    "queried: "
+                    + ", ".join(str(d) for d in skipped_days)
+                    + ". The camera may be busy or the cloud index is not "
+                    "ready yet."
+                )
+            else:
+                message = (
+                    f"Recent-recording synchronization finished. No new "
+                    f"recordings in the last {hours} hours."
+                )
+            persistent_notification.async_create(
+                self.hass,
+                message,
+                title=f"{entry.title}: media synchronization",
+                notification_id=f"{DOMAIN}_sync_{entry_id}",
+            )
         except Exception as err:
-            LOGGER.warning("EZVIZ recent media synchronization failed (%s)", type(err).__name__, exc_info=True)
+            LOGGER.warning(
+                "EZVIZ recent media synchronization failed (%s)",
+                type(err).__name__,
+                exc_info=True,
+            )
         finally:
             self._syncing.discard(entry_id)
 
@@ -495,7 +541,7 @@ def _month_name(month: int) -> str:
 
 def _format_size(size: int) -> str:
     """Format download progress sizes with readable binary units."""
-    value = max(0, float(size))
+    value = max(0.0, float(size))
     for unit in ("B", "KiB", "MiB", "GiB"):
         if value < 1024 or unit == "GiB":
             return f"{int(value)} {unit}" if unit == "B" else f"{value:.1f} {unit}"
