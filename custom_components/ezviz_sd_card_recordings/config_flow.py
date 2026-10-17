@@ -302,29 +302,42 @@ class EzvizOptionsFlow(config_entries.OptionsFlow):
         })
 
     async def async_step_sync_hours(self, user_input: dict | None = None):
-        """Get the user's custom rolling window before saving sync settings."""
+        """Get the user's custom rolling window before saving sync settings.
+
+        Uses a free-form integer input instead of a 1-168 hour slider so users
+        with very large SD cards can synchronise longer windows (for example a
+        2 TB card that holds several years of recordings). An empty value falls
+        back to the default 24-hour window.
+        """
         if self._pending_options is None:
             self._pending_options = dict(self.config_entry.options)
-        errors = {}
+        errors: dict[str, str] = {}
         if user_input is not None:
-            try:
-                hours = int(user_input[CONF_SYNC_HOURS])
-                if not 1 <= hours <= 168:
-                    raise ValueError
-            except (TypeError, ValueError):
+            raw = str(user_input.get(CONF_SYNC_HOURS) or "").strip()
+            hours: int | None = None
+            if raw == "":
+                # Blank means "use the default 24-hour rolling window".
+                hours = DEFAULT_SYNC_HOURS
+            else:
+                try:
+                    parsed = int(raw)
+                except (TypeError, ValueError):
+                    parsed = 0
+                if parsed >= 1:
+                    hours = parsed
+            if hours is None:
                 errors[CONF_SYNC_HOURS] = "invalid_hours"
-            if not errors:
+            else:
                 self._pending_options[CONF_SYNC_HOURS] = hours
                 return await self._async_save_pending_options()
-        default_hours = int(self._pending_options.get(CONF_SYNC_HOURS, 24) or 24)
-        if not 1 <= default_hours <= 168:
-            default_hours = 24
+
+        current_hours = self._pending_options.get(CONF_SYNC_HOURS)
+        if not isinstance(current_hours, int) or current_hours < 1:
+            current_hours = DEFAULT_SYNC_HOURS
         return self.async_show_form(
             step_id="sync_hours",
             data_schema=vol.Schema({
-                vol.Required(CONF_SYNC_HOURS, default=default_hours): vol.All(
-                    vol.Coerce(int), vol.Range(min=1, max=168)
-                ),
+                vol.Optional(CONF_SYNC_HOURS, default=str(current_hours)): str,
             }),
             errors=errors,
         )
