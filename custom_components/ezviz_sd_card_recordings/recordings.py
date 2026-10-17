@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 from datetime import date, datetime, timezone, tzinfo
 from typing import Any, Iterator
 
@@ -77,26 +78,69 @@ def _first(record: dict[str, Any], names: tuple[str, ...]) -> Any:
     return None
 
 
-def record_key(record: dict[str, Any]) -> str:
-    """Stable opaque key for a descriptor; doesn't expose URLs in HA identifiers."""
-    # Remove URL/ticket/auth fields because these may be short-lived and change
-    # between two otherwise identical archive queries.
-    volatile_terms = ("url", "uri", "ticket", "token", "expires", "signature", "auth")
+def _stable_record_payload(record: dict[str, Any]) -> dict[str, Any]:
+    """Return a stable representation of a record descriptor.
+
+    Removes volatile fields (URLs, tokens, signatures) that change between
+    queries for the same underlying recording, so the hash suffix in the
+    record key stays the same across page reloads and fresh API responses.
+    """
+    volatile_terms = (
+        "url", "uri", "ticket", "token", "expires", "signature", "auth",
+    )
 
     def stable(value: Any) -> Any:
         if isinstance(value, dict):
             return {
                 str(key): stable(child)
-                for key, child in sorted(value.items(), key=lambda pair: str(pair[0]))
+                for key, child in sorted(
+                    value.items(), key=lambda pair: str(pair[0])
+                )
                 if not any(term in str(key).lower() for term in volatile_terms)
             }
         if isinstance(value, list):
             return [stable(child) for child in value]
         return value
 
-    serialized = json.dumps(stable(record), sort_keys=True, default=str, separators=(",", ":"))
-    return hashlib.sha256(serialized.encode()).hexdigest()[:20]
+    return stable(record)
 
+
+def record_key(
+    record: dict[str, Any],
+    start: datetime,
+    end: datetime,
+) -> str:
+    """Return a sortable, human-readable key for a recording descriptor.
+
+    Format: ``HHMMSS_HHMMSS_<hash8>``
+
+    * First ``HHMMSS`` is the local recording start time.
+    * Second ``HHMMSS`` is the local recording end time.
+    * ``hash8`` is the first 8 characters of SHA-256 over a stable
+      representation of the descriptor. This preserves uniqueness for
+      the rare case of two clips with identical start and end times.
+
+    The date is already encoded in the cache directory layout
+    (``video/YYYY/MM/DD/<key>.mp4``), so the key only needs the time of
+    day. Alphabetical sorting of these filenames therefore produces a
+    chronological listing within a day.
+
+    Example:
+        ``092741_092902_a1b2c3d4`` → clip from 09:27:41 to 09:29:02.
+
+    Note: this replaces the previous hash-only format (``<hash20>``).
+    Cached files created with the old format are not matched by
+    ``_cached_path`` after upgrade and become orphans on disk. Users
+    with a populated cache should either run "Delete cache" from the
+    integration options or let the orphans remain until disk pressure
+    forces cleanup.
+    """
+    payload = _stable_record_payload(record)
+    serialized = json.dumps(
+        payload, sort_keys=True, default=str, separators=(",", ":")
+    )
+    suffix = hashlib.sha256(serialized.encode()).hexdigest()[:8]
+    return f"{start:%H%M%S}_{end:%H%M%S}_{suffix}"
 
 
 def resolve_api_serial(configured_serial: str, available_serials: Any) -> str:
@@ -127,6 +171,7 @@ def resolve_api_serial(configured_serial: str, available_serials: Any) -> str:
         "The configured camera serial matches more than one EZVIZ device; enter its exact short API serial."
     )
 
+
 def serial_identity(configured_serial: str) -> str:
     """Normalize full sticker serials and short API serials to a dedupe key.
 
@@ -134,8 +179,6 @@ def serial_identity(configured_serial: str) -> str:
     nine characters, e.g. ``...CCRRBC8610065`` and ``BC8610065``. Using the
     suffix prevents adding the same camera twice with two serial formats.
     """
-    import re
-
     requested = str(configured_serial).strip().upper()
     match = re.search(r"([A-Z]{2}\d{7})$", requested)
     return match.group(1) if match else requested
@@ -155,7 +198,7 @@ def normalize_records(payload: Any, local_timezone: tzinfo | None = None) -> lis
             end = start
         if end < start:
             continue
-        key = record_key(record)
+        key = record_key(record, start, end)
         found[key] = {
             "key": key,
             "start": start,
@@ -163,7 +206,6 @@ def normalize_records(payload: Any, local_timezone: tzinfo | None = None) -> lis
             "raw": record,
         }
     return sorted(found.values(), key=lambda item: item["start"])
-
 
 
 def format_native_playback_timestamp(value: datetime, local_timezone: tzinfo | None = None) -> str:
@@ -181,6 +223,7 @@ def format_native_playback_timestamp(value: datetime, local_timezone: tzinfo | N
         else:
             value = value.astimezone(local_timezone)
     return value.strftime("%Y%m%dT%H%M%SZ")
+
 
 def format_record_title(record: dict[str, Any]) -> str:
     """Format one descriptor as a readable local-time interval."""
