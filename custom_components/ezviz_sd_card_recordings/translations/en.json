@@ -50,7 +50,7 @@
       },
       "configure_media": {
         "title": "Configure Media",
-        "description": "Choose date and recording order. Media Sync is Off by default. When enabled, the integration checks for new recordings every 15 minutes and downloads recordings in the selected rolling window. Cached videos and thumbnails are stored in .storage/ezviz_sd_card_recordings/<entry_id> by default. Set a Cold storage path outside your config (for example /media/ezviz_sd_card_recordings/front_camera) to avoid bloating backups.",
+        "description": "Choose date and recording order. Media Sync is Off by default. When enabled, the integration checks for new recordings every 15 minutes and downloads recordings in the selected rolling window. Cached videos and thumbnails are stored in .storage/ezviz_sd_card_recordings/[entry_id] by default. Set a Cold storage path outside your config (for example /media/ezviz_sd_card_recordings/front_camera) to avoid bloating backups.",
         "data": {
           "order_days": "Order of days in Media Browser",
           "order_recordings": "Order of recordings in Media Browser",
@@ -66,7 +66,7 @@
       },
       "sync_window": {
         "title": "Media Sync settings",
-        "description": "Choose automatic sync to keep the latest 24 hours up to date, or a custom rolling window of 1–168 hours. Synchronization runs every 15 minutes. Cold storage path is optional; leave it empty to use the default private cache.",
+        "description": "Choose automatic sync to keep the latest 24 hours up to date, or a custom rolling window that you specify in the next step. Synchronization runs every 15 minutes. Cold storage path is optional; leave it empty to use the default private cache.",
         "data": {
           "sync_mode": "Synchronization window",
           "cold_storage_path": "Cold storage path (Optional)"
@@ -74,16 +74,16 @@
       },
       "sync_hours": {
         "title": "Custom synchronization window",
-        "description": "Enter the number of recent hours to keep cached. New recordings in this rolling window are picked up automatically during the 15-minute checks. Maximum: 168 hours (7 days).",
+        "description": "Enter the number of recent hours to keep cached. New recordings in this rolling window are picked up automatically during the 15-minute checks. Leave empty to use the default 24 hours. There is no upper limit, so large SD cards (for example 2 TB cards holding several years of recordings) can be synchronized in full if desired.",
         "data": {
-          "sync_hours": "Number of hours to keep synchronized"
+          "sync_hours": "Number of hours to keep synchronized (leave empty for 24)"
         }
       }
     },
     "error": {
       "invalid_path": "Enter an absolute filesystem path.",
       "path_in_use": "This cold storage path is already assigned to another camera.",
-      "invalid_hours": "Enter a number from 1 to 168 hours."
+      "invalid_hours": "Enter a positive number of hours (minimum 1). Leave empty to use the default 24 hours."
     }
   }
 }
