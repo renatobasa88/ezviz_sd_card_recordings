@@ -69,7 +69,7 @@
         "description": "Pilih sinkronisasi otomatis agar 24 jam terakhir selalu diperbarui, atau rentang berjalan manual 1–168 jam. Sinkronisasi berjalan setiap 15 menit. Cold storage path bersifat opsional; kosongkan untuk memakai cache privat default.",
         "data": {
           "sync_mode": "Rentang sinkronisasi",
-          "cold_storage_path": "Cold storage path"
+          "cold_storage_path": "Cold storage path (Opsional)"
         }
       },
       "sync_hours": {
