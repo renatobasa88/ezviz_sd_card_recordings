@@ -97,6 +97,8 @@ Add the repository as a **custom repository** in HACS, category **Integration**.
 
 ## Optional: Dashboard Timeline Card
 
+![EZVIZ Timeline Card preview](https://raw.githubusercontent.com/renatobasa88/ezviz_sd_card_recordings/main/dashboard.jpg)
+
 The integration ships with an optional Lovelace card (`ezviz-timeline-card.js`) that adds a live view, an interactive playback timeline, a PTZ pad, and a configurable entity panel on top of the same Media Source. **The card is entirely optional** — the integration works without it. If you do not want the card, skip this section.
 
 ### Auto-loaded (recommended)
