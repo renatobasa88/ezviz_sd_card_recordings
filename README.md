@@ -17,6 +17,7 @@ A Home Assistant custom integration intended to expose EZVIZ camera SD-card reco
 - [x] On-demand download/cache when a descriptor provides a direct HTTPS media URL.
 - [x] Native SD-card playback downloader for descriptors without direct HTTPS media URLs, implemented through the pinned `pyEzvizApi` cloud-playback pull-request commit.
 - [x] Human-readable, chronologically sortable cache filenames (`HHMMSS_HHMMSS_<hash8>.mp4`).
+- [x] Bundled optional Lovelace card (`ezviz-timeline-card.js`) with live view, playback timeline, PTZ, and entity panel.
 - [ ] End-to-end validated **browser playback** — see Known issues below.
 
 **Important limitation:** the native playback dependency is pinned to an open, unmerged upstream pull request. It has reports of manual validation by its author, and has been exercised against H8c and C6N cameras in the Singapore region, but results vary by model and firmware. When selected, a complete clip is downloaded and remuxed before playback; true segmented direct streaming is not implemented.
@@ -93,6 +94,126 @@ The region dropdown includes Singapore/Asia (`apiisgp.ezvizlife.com`), Europe (`
 ## Install through HACS (after publishing this repository)
 
 Add the repository as a **custom repository** in HACS, category **Integration**. Then download it and restart Home Assistant. This project is not yet published to the HACS default store.
+
+## Optional: Dashboard Timeline Card
+
+The integration ships with an optional Lovelace card (`ezviz-timeline-card.js`) that adds a live view, an interactive playback timeline, a PTZ pad, and a configurable entity panel on top of the same Media Source. **The card is entirely optional** — the integration works without it. If you do not want the card, skip this section.
+
+### Auto-loaded (recommended)
+
+If `ezviz-timeline-card.js` is present in `custom_components/ezviz_sd_card_recordings/`, the integration registers the file at `/ezviz_sd_card_recordings/ezviz-timeline-card.js` and injects it into the frontend on startup. **No manual resource is required.**
+
+After a restart, confirm it loaded by searching the Home Assistant log for:
+
+### Manual resource (fallback)
+
+If the integration was installed before the card was bundled, or the card does not appear after a restart, register the resource manually:
+
+1. Go to **Settings → Dashboards → ⋮ (top right) → Resources → + Add resource**.
+2. **URL:** `/ezviz_sd_card_recordings/ezviz-timeline-card.js`
+3. **Resource type:** `JavaScript Module`
+4. Save, then hard-refresh the browser (`Ctrl+Shift+R` / `Cmd+Shift+R`).
+
+### Adding the card to a dashboard
+
+1. Edit a dashboard → **Add Card** → **Manual**.
+2. Paste the YAML below and adjust entity IDs, `ezviz_entry_id`, and text for your setup.
+
+```yaml
+type: custom:ezviz-timeline-card
+subtitle: CCTV Rumah Utama Depan
+camera_entity: camera.rumah_depan_rena_tobasa
+ezviz_entry_id: 01M548TKXXWSW1YEBPKAERXXXX
+window_hours: 24
+theme: dark
+accent_color: '#56d4c6'
+refresh_seconds: 60
+
+ptz:
+  up: button.rumah_depan_rena_tobasa_ptz_up
+  down: button.rumah_depan_rena_tobasa_ptz_down
+  left: button.rumah_depan_rena_tobasa_ptz_left
+  right: button.rumah_depan_rena_tobasa_ptz_right
+
+other:
+  - entity: switch.rumah_depan_rena_tobasa_all_day_video_recording
+    name: All day video recording
+  - entity: switch.rumah_depan_rena_tobasa_audio
+    name: Audio
+  - entity: switch.rumah_depan_rena_tobasa_infrared_light
+    name: Infrared light
+  - entity: switch.rumah_depan_rena_tobasa_motion_tracking
+    name: Motion tracking
+  - entity: switch.rumah_depan_rena_tobasa_sleep
+    name: Sleep
+  - entity: switch.rumah_depan_rena_tobasa_status_light
+    name: Status light
+  - entity: binary_sensor.rumah_depan_rena_tobasa_alarm_schedules_enabled
+    name: Alarm schedules enabled
+  - entity: binary_sensor.rumah_depan_rena_tobasa_encryption
+    name: Encryption
+  - entity: sensor.rumah_depan_rena_tobasa_last_alarm_type_code
+    name: Last alarm type code
+  - entity: sensor.rumah_depan_rena_tobasa_last_alarm_type_name
+    name: Last alarm type name
+  - entity: sensor.rumah_depan_rena_tobasa_local_ip
+    name: Local IP
+  - entity: binary_sensor.rumah_depan_rena_tobasa_motion
+    name: Motion
+  - entity: sensor.rumah_depan_rena_tobasa_pir_status
+    name: PIR status
+  - entity: sensor.rumah_depan_rena_tobasa_supported_channels
+    name: Supported channels
+  - entity: sensor.rumah_depan_rena_tobasa_wan_ip
+    name: WAN IP
+```
+
+### Where to find `ezviz_entry_id`
+
+`ezviz_entry_id` is the config-entry ID assigned when the integration was added. Two ways to get it:
+
+- **From the Media Browser URL.** Open **Media → EZVIZ SD Card Recordings** and pick any camera. The address bar shows `media-source://ezviz_sd_card_recordings/<entry_id>/...` — the long string immediately after the camera segment is the entry ID. For example:
+
+→ `http://<your-ha>:8123/media-browser/browser/app%2Cmedia-source%3A%2F%2Fezviz_sd_card_recordings/%2Cmedia-source%3A%2F%2Fezviz_sd_card_recordings%2F01M548TKXXWSW1YEBPKAERXXXX`
+
+→ `01M548TKXXWSW1YEBPKAERXXXX`
+
+- **From `.storage/core.config_entries`.** Search for `"domain": "ezviz_sd_card_recordings"` and copy the `entry_id` value. Do not share this file publicly.
+
+### Configuration reference
+
+| Key | Required | Default | Notes |
+|---|---|---|---|
+| `subtitle` | ✅ | — | Header text shown above the player. |
+| `camera_entity` | ✅ | — | Live camera entity (`camera.*`). Used for the Live tab. |
+| `ezviz_entry_id` | ✅ | — | Config-entry ID of the integration (see above). |
+| `window_hours` | — | `24` | Timeline zoom window: `6`, `12`, or `24`. |
+| `theme` | — | `dark` | `dark` or `light`. |
+| `accent_color` | — | `#56d4c6` | Any CSS color. |
+| `refresh_seconds` | — | `60` | Minimum `15`. Timeline reload interval while today is selected. |
+| `default_date` | — | today | Opening date in `YYYY-MM-DD`. |
+| `ptz` | — | — | Optional; shows the **PTZ** tab. Each direction must be a `button.*` entity. |
+| `other` | — | — | Optional; shows the **Other** tab. A list of `{ entity, name }`. |
+
+### What the card gives you
+
+- **Live tab** — live camera, autoplay, audio muted by default. This is the default view.
+- **Playback tab** — the timeline and record list only appear when this tab is selected. Click a segment or a recording to play it. Uncached clips are downloaded to the HA cache automatically; the card waits and refreshes.
+- **PTZ tab** — a 4-way directional pad that calls `button.press` on the configured entities. Hidden when `ptz:` is not set.
+- **Other tab** — one row per entity, with the widget chosen from the domain:
+- `switch` / `input_boolean` / `light` / `fan` → toggle
+- `siren` → On / Off pair
+- `button` → Press
+- `script` → Run
+- anything else (sensors, binary sensors, …) → state display with unit
+
+Hidden when `other:` is not set.
+- **Player controls** — pinch / Ctrl+scroll / `+` `−` buttons to zoom (up to 6×), drag to pan when zoomed, double-click or double-tap to reset zoom, and a fullscreen button.
+
+### Known limitations
+
+- The card inherits the HEVC playback limitation described under **Known issues**. If the cached clip cannot be decoded in the browser, download it and open it in VLC.
+- The card does not replace the standard Media Browser; it is a convenience layer on top of the same cached files.
 
 ## What happens when a recording is selected?
 
