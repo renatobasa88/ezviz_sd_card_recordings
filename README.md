@@ -4,7 +4,7 @@
 
 **Early prototype / research build — not yet a complete playback replacement for EZVIZ Studio.**
 
-> **0.4.0:** Alpha Project
+> **0.5:** Alpha Project
 A Home Assistant custom integration intended to expose EZVIZ camera SD-card recordings through **Media → EZVIZ SD Card Recordings**, with a year/month/day hierarchy and on-demand local caching.
 
 ## Current status
@@ -89,7 +89,20 @@ Recordings on the physical SD card are untouched. New downloads will use the new
 4. Search for **EZVIZ SD Card Recordings** and enter the EZVIZ account, password, region API hostname, camera serial, and channel.
 5. Open **Media → EZVIZ SD Card Recordings → camera → year → month → day**.
 
-The region dropdown includes Singapore/Asia (`apiisgp.ezvizlife.com`), Europe (`apiieu.ezvizlife.com`), South America (`apiisa.ezvizlife.com`), North America (`apiius.ezvizlife.com`), India (`apiiindia.ezvizlife.com`), China (`api.ys7.com`), and a custom-hostname option. Serial accepts either the full serial printed on the sticker (for example `CS-C6N-R101-1G2WF0120240506CCRRBC8610065`) or the short API serial (`BC8610065`). `pyEzvizApi` may request an MFA verification code during setup; the flow supports a prompted code, but the behavior can vary by account/region.
+The region dropdown includes:
+
+| Region | Hostname |
+|---|---|
+| Singapore | `apiisgp.ezvizlife.com` |
+| Asia | `apiias.ezvizlife.com` |
+| Europe | `apiieu.ezvizlife.com` |
+| South America | `apiisa.ezvizlife.com` |
+| North America / US | `apiius.ezvizlife.com` |
+| India | `apiiindia.ezvizlife.com` |
+| China | `apiicn.ezvizlife.com` |
+| Russia | `apirus.ezvizru.com` |
+
+A custom-hostname option is also available for accounts not covered by any preset. Serial accepts either the full serial printed on the sticker (for example `CS-C6N-R101-1G2WF0120240506CCRRBC861XXXX`) or the short API serial (`BC861XXXX`). `pyEzvizApi` may request an MFA verification code during setup; the flow supports a prompted code, but the behavior can vary by account/region.
 
 ## Install through HACS (after publishing this repository)
 
