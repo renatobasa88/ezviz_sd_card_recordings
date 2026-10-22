@@ -17,12 +17,14 @@ CONF_ORDER_RECORDINGS = "order_recordings"
 CONF_MEDIA_SYNC = "media_sync"
 CONF_SYNC_MODE = "sync_mode"
 CONF_SYNC_HOURS = "sync_hours"
+CONF_SYNC_NOTIFY = "sync_notify"
 CONF_COLD_STORAGE_PATH = "cold_storage_path"
 
 DEFAULT_ORDER_DAYS = "descending"
 DEFAULT_ORDER_RECORDINGS = "descending"
 DEFAULT_MEDIA_SYNC = "off"
 DEFAULT_SYNC_HOURS = 24
+DEFAULT_SYNC_NOTIFY = "on"
 DEFAULT_COLD_STORAGE_PATH = ""
 
 DEFAULT_REGION = "apiisgp.ezvizlife.com"
