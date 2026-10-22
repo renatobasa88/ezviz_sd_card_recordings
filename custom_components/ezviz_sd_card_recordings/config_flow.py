@@ -18,13 +18,14 @@ from .const import (
     CONF_ORDER_DAYS,
     CONF_ORDER_RECORDINGS,
     CONF_MEDIA_SYNC,
+    CONF_SYNC_HOURS,
     CONF_SYNC_MODE,
+    CONF_SYNC_NOTIFY,
     CONF_REGION,
     CONF_USERNAME,
     CONF_PASSWORD,
     CONF_SERIAL,
     CONF_SESSION_TOKEN,
-    CONF_SYNC_HOURS,
     DEFAULT_CHANNEL,
     DEFAULT_COLD_STORAGE_PATH,
     DEFAULT_ORDER_DAYS,
@@ -32,6 +33,7 @@ from .const import (
     DEFAULT_MEDIA_SYNC,
     DEFAULT_REGION,
     DEFAULT_SYNC_HOURS,
+    DEFAULT_SYNC_NOTIFY,
     DOMAIN,
     ERROR_AUTH,
     ERROR_CANNOT_CONNECT,
@@ -55,6 +57,10 @@ REGION_OPTIONS = [
 _ORDER_OPTIONS = [
     {"label": "Ascending", "value": "ascending"},
     {"label": "Descending", "value": "descending"},
+]
+_NOTIFY_OPTIONS = [
+    {"label": "On — show a summary notification after each sync", "value": "on"},
+    {"label": "Off — sync silently in the background", "value": "off"},
 ]
 _REGION_PATTERN = re.compile(r"^api[a-z0-9-]+\.ezvizlife\.com$", re.IGNORECASE)
 
@@ -241,6 +247,7 @@ class EzvizOptionsFlow(config_entries.OptionsFlow):
             })
             updated.setdefault(CONF_SYNC_HOURS, DEFAULT_SYNC_HOURS)
             updated.setdefault(CONF_COLD_STORAGE_PATH, DEFAULT_COLD_STORAGE_PATH)
+            updated.setdefault(CONF_SYNC_NOTIFY, DEFAULT_SYNC_NOTIFY)
             self._pending_options = updated
             if user_input[CONF_MEDIA_SYNC] == "on":
                 return await self.async_step_sync_window()
@@ -264,7 +271,7 @@ class EzvizOptionsFlow(config_entries.OptionsFlow):
         return self.async_show_form(step_id="configure_media", data_schema=schema)
 
     async def async_step_sync_window(self, user_input: dict | None = None):
-        """Offer automatic recent sync or a custom rolling-hour window."""
+        """Offer automatic recent sync, custom rolling-hour window, and notification toggle."""
         if self._pending_options is None:
             self._pending_options = dict(self.config_entry.options)
         if user_input is not None:
@@ -279,6 +286,12 @@ class EzvizOptionsFlow(config_entries.OptionsFlow):
             else:
                 self._pending_options.pop(CONF_COLD_STORAGE_PATH, None)
             self._pending_options[CONF_SYNC_MODE] = user_input[CONF_SYNC_MODE]
+
+            notify_value = user_input.get(CONF_SYNC_NOTIFY, DEFAULT_SYNC_NOTIFY)
+            if notify_value not in {"on", "off"}:
+                notify_value = DEFAULT_SYNC_NOTIFY
+            self._pending_options[CONF_SYNC_NOTIFY] = notify_value
+
             if user_input[CONF_SYNC_MODE] == "always":
                 # Poll every 15 minutes and keep the latest rolling 24 hours cached.
                 self._pending_options[CONF_SYNC_HOURS] = 24
@@ -293,6 +306,9 @@ class EzvizOptionsFlow(config_entries.OptionsFlow):
         default_mode = options.get(CONF_SYNC_MODE)
         if default_mode not in {"always", "manual"}:
             default_mode = "manual" if int(options.get(CONF_SYNC_HOURS, 24) or 24) != 24 else "always"
+        notify_default = options.get(CONF_SYNC_NOTIFY, DEFAULT_SYNC_NOTIFY)
+        if notify_default not in {"on", "off"}:
+            notify_default = DEFAULT_SYNC_NOTIFY
         return vol.Schema({
             vol.Required(CONF_SYNC_MODE, default=default_mode): selector.SelectSelector(
                 selector.SelectSelectorConfig(options=[
@@ -301,6 +317,9 @@ class EzvizOptionsFlow(config_entries.OptionsFlow):
                 ], mode=selector.SelectSelectorMode.DROPDOWN)
             ),
             vol.Optional(CONF_COLD_STORAGE_PATH, default=options.get(CONF_COLD_STORAGE_PATH, "")): str,
+            vol.Required(CONF_SYNC_NOTIFY, default=notify_default): selector.SelectSelector(
+                selector.SelectSelectorConfig(options=_NOTIFY_OPTIONS, mode=selector.SelectSelectorMode.DROPDOWN)
+            ),
         })
 
     async def async_step_sync_hours(self, user_input: dict | None = None):
