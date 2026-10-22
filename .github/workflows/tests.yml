@@ -9,11 +9,18 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+
       - uses: actions/setup-python@v5
         with:
           python-version: "3.13"
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
       - name: Compile Python files
         run: python -m compileall -q custom_components tests
+
       - name: Validate JSON files
         run: |
           python - <<'PY'
@@ -23,5 +30,25 @@ jobs:
               json.loads(path.read_text(encoding="utf-8"))
               print("valid:", path)
           PY
+
+      - name: Validate manifest version
+        run: |
+          python - <<'PY'
+          import json
+          from pathlib import Path
+          manifest = Path("custom_components/ezviz_sd_card_recordings/manifest.json")
+          data = json.loads(manifest.read_text(encoding="utf-8"))
+          version = data.get("version")
+          assert isinstance(version, str) and version, "manifest.json must declare a non-empty version"
+          parts = version.split(".")
+          assert len(parts) == 3 and all(p.isdigit() for p in parts), f"version must be semver-like, got {version!r}"
+          print("manifest version:", version)
+          PY
+
+      - name: Check JavaScript syntax
+        run: |
+          node --check custom_components/ezviz_sd_card_recordings/ezviz-timeline-card.js
+          echo "JS syntax OK"
+
       - name: Run offline utility tests
         run: python -m unittest discover -s tests -v
