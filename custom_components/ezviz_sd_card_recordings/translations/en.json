@@ -50,7 +50,7 @@
       },
       "configure_media": {
         "title": "Configure Media",
-        "description": "Choose date and recording order. Media Sync is Off by default. When enabled, the integration checks for new recordings every 15 minutes and downloads recordings in the selected rolling window. Cached videos and thumbnails are stored in .storage/ezviz_sd_card_recordings/[entry_id] by default. Set a Cold storage path outside your config (for example /media/ezviz_sd_card_recordings/front_camera) to avoid bloating backups.",
+        "description": "Choose date and recording order. Media Sync is Off by default. When enabled, the integration checks for new recordings every 15 minutes and downloads recordings in the selected rolling window. Recordings older than the window are removed from the local cache automatically, so a 24-hour window keeps roughly 24 hours on disk. Cached videos and thumbnails are stored in .storage/ezviz_sd_card_recordings/[entry_id] by default. Set a Cold storage path outside your config (for example /media/ezviz_sd_card_recordings/front_camera) to avoid bloating backups.",
         "data": {
           "order_days": "Order of days in Media Browser",
           "order_recordings": "Order of recordings in Media Browser",
@@ -66,15 +66,16 @@
       },
       "sync_window": {
         "title": "Media Sync settings",
-        "description": "Choose automatic sync to keep the latest 24 hours up to date, or a custom rolling window that you specify in the next step. Synchronization runs every 15 minutes. Cold storage path is optional; leave it empty to use the default private cache.",
+        "description": "Choose automatic sync to keep the latest 24 hours up to date, or a custom rolling window that you specify in the next step. Synchronization runs every 15 minutes and prunes recordings that fall outside the window. Cold storage path is optional; leave it empty to use the default private cache. Sync notifications only control the summary message shown after each automatic sync; individual manual downloads still notify you.",
         "data": {
           "sync_mode": "Synchronization window",
-          "cold_storage_path": "Cold storage path (Optional)"
+          "cold_storage_path": "Cold storage path (Optional)",
+          "sync_notify": "Sync notifications"
         }
       },
       "sync_hours": {
         "title": "Custom synchronization window",
-        "description": "Enter the number of recent hours to keep cached. New recordings in this rolling window are picked up automatically during the 15-minute checks. Leave empty to use the default 24 hours. There is no upper limit, so large SD cards (for example 2 TB cards holding several years of recordings) can be synchronized in full if desired.",
+        "description": "Enter the number of recent hours to keep cached. New recordings in this rolling window are picked up automatically during the 15-minute checks. Recordings older than the window are removed from the local cache automatically. Leave empty to use the default 24 hours. There is no upper limit, so large SD cards (for example 2 TB cards holding several years of recordings) can be synchronized in full if desired.",
         "data": {
           "sync_hours": "Number of hours to keep synchronized (leave empty for 24)"
         }
