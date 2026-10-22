@@ -22,6 +22,30 @@ A Home Assistant custom integration intended to expose EZVIZ camera SD-card reco
 
 **Important limitation:** the native playback dependency is pinned to an open, unmerged upstream pull request. It has reports of manual validation by its author, and has been exercised against H8c and C6N cameras in the Singapore region, but results vary by model and firmware. When selected, a complete clip is downloaded and remuxed before playback; true segmented direct streaming is not implemented.
 
+### Hardware, bandwidth, and camera recommendations
+
+The integration downloads SD-card recordings from the EZVIZ cloud to local storage. The workload depends almost entirely on **how the camera records**, not on how many days you keep cached. Two profiles matter:
+
+| Profile | Typical per day | Per 15-min sync | Disk steady state (24 h) | Notes |
+|---|---|---|---|---|
+| **Motion-triggered only** (recommended) | ~100–300 MB | few MB, mostly idle | ~100–300 MB | Matches most EZVIZ defaults. Light on CPU, disk, and network. |
+| **Continuous 24/7 @ 2 Mbps** | ~21 GB | ~200–500 MB burst | ~21 GB | Heavy network and disk write. Not recommended without a separate SSD. |
+| **Continuous 24/7 @ 4 Mbps** | ~43 GB | ~400–900 MB burst | ~43 GB | Same as above, doubled. |
+
+**Internet bandwidth:** motion-only needs almost nothing (sub-1 Mbps average). Continuous 2 Mbps per camera requires a stable downstream of at least 2.5 Mbps per camera to keep the cache from falling behind. Upload is not used — downloads are one-way from the EZVIZ cloud.
+
+**Home Assistant hardware:**
+
+- **Raspberry Pi 4 / HA Green / HA Yellow** — fine for motion-only with up to 4–6 cameras. FFmpeg thumbnail generation is the only CPU burst (0.1–0.5 s per clip).
+- **Raspberry Pi 3 / Pi Zero** — motion-only works, but keep `sync_hours` at 24 and avoid enabling sync on more than 2 cameras. Continuous recording is not recommended.
+- **Mini PC / NUC with SSD** — comfortable for 4–8 cameras including continuous recording.
+
+**Storage:** the default location is `.storage/ezviz_sd_card_recordings/<entry_id>/` inside the Home Assistant config tree. If the config directory lives on an SD card, configure a **Cold storage path** on a separate SSD or NAS to avoid wearing out the SD card — continuous recording writes 20–40 GB per camera per day and will shorten SD card lifespan in months. The v0.6 sync engine prunes files outside `sync_hours` after every cycle, so the cache reaches a steady state (~`sync_hours × per-hour rate`) and does not grow without bound.
+
+**Camera count:** motion-only with up to 4–6 cameras on a mid-range HA host is well tested. Continuous recording with more than 2–3 cameras is untested.
+
+**⚠️ Recommendation:** this integration is production-ready for **motion-triggered recording**, which is the EZVIZ default and what most users run. **Continuous 24/7 recording has not been fully validated** — the download pipeline works, but sustained multi-camera load, disk wear, and EZVIZ cloud rate limits have not been stress-tested. If you need continuous recording, start with a single camera, a `sync_hours` of `24`, and a cold-storage path on an SSD, then observe disk usage and log warnings before scaling up.
+
 The integration does **not** sync the whole SD card by default. **Media Sync is Off by default.** If enabled, it checks for new recordings every 15 minutes and caches the latest rolling 24 hours automatically, or a custom rolling window with no upper bound (useful for large SD cards holding months or years of recordings). Videos and thumbnails are stored per camera under `.storage/ezviz_sd_card_recordings/<entry_id>/video/` and `.storage/ezviz_sd_card_recordings/<entry_id>/thumb/`. Cached files are served through an authenticated Home Assistant API endpoint rather than the public `/local/` route.
 
 Uncached clips are queued in the background. A persistent notification shows the camera name, recording timestamp, download status and progress when available; when completed it says **Download media success**. After it completes, select the clip again to play it. FFmpeg generates a JPEG thumbnail for cached clips. Per-camera **Configure Media** options control day/recording order, Media Sync, automatic or custom-hour synchronization, and an optional unique cold-storage path. Changing the path migrates existing videos and thumbnails. **Delete all cache and recording** removes only local cached files; it does not erase recordings on the camera's SD card.
