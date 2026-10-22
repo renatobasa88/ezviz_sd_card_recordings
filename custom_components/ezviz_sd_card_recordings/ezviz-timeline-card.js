@@ -78,6 +78,16 @@ class EzvizTimelineCard extends HTMLElement {
     const player = this.shadowRoot.querySelector('#live-slot ha-hls-player, #live-slot ha-camera-stream');
     if (player) player.hass = hass;
     if (!this._started) { this._start(); return; }
+
+    // Re-mount live player if the camera availability changed while on Live tab
+    if (oldHass && this._tab === 'live') {
+      const oldState = oldHass.states[this._config.camera_entity];
+      const newState = hass.states[this._config.camera_entity];
+      const oldOffline = !oldState || oldState.state === 'unavailable' || oldState.state === 'unknown';
+      const newOffline = !newState || newState.state === 'unavailable' || newState.state === 'unknown';
+      if (oldOffline !== newOffline) this._mountLivePlayer();
+    }
+
     if (oldHass && this._tab === 'other' && this._otherEntities.length) {
       const changed = this._otherEntities.some(e => oldHass.states[e] !== hass.states[e]);
       if (changed) this._renderOtherTab();
@@ -127,8 +137,10 @@ class EzvizTimelineCard extends HTMLElement {
         .player-layer video{max-height:none;min-height:0}
         .placeholder{position:absolute;inset:0;display:flex;flex-direction:column;align-items:center;justify-content:center;text-align:center;padding:22px;gap:10px;color:#aab7c7;background:#05070a}
         .placeholder svg{width:36px;height:36px;color:var(--ez-accent)}
+        .placeholder.offline svg{color:#ff8f8f}
         .placeholder strong{color:#eef5fc;font-size:14px}
         .placeholder small{line-height:1.5;max-width:440px}
+        .placeholder code{background:rgba(255,255,255,.06);padding:1px 5px;border-radius:4px;font-size:.9em}
         .player-ctrls{position:absolute;top:10px;right:10px;z-index:10;display:flex;gap:4px;background:rgba(5,9,14,.72);backdrop-filter:blur(10px);border-radius:10px;padding:4px;border:1px solid rgba(255,255,255,.08)}
         .pctrl{background:transparent;border:0;color:#f3f7fa;width:28px;height:28px;border-radius:6px;font-size:16px;display:grid;place-items:center;line-height:1;padding:0}
         .pctrl:hover{background:rgba(255,255,255,.16)}
@@ -492,7 +504,7 @@ class EzvizTimelineCard extends HTMLElement {
         const ts = this._winStart + f * (this._winEnd - this._winStart);
         const rec = this._records.find(r => ts >= r.start && ts <= Math.max(r.start + 1, r.end));
         if (rec) this._playRecord(rec, Math.max(0, Math.floor(ts - rec.start)));
-        else this._toast(`Tidak ada segmen rekaman pada ${this._formatTime(ts)}.`);
+        else this._toast(`No recording segment at ${this._formatTime(ts)}.`);
       } else {
         this._updateWindowLabel();
       }
@@ -663,7 +675,6 @@ class EzvizTimelineCard extends HTMLElement {
     player.addEventListener('pointerup', endPointer);
     player.addEventListener('pointercancel', endPointer);
     player.addEventListener('pointerleave', (ev) => {
-      // only end capture-driven pointers, hover doesn't apply
       if (this._pointers.size > 0) endPointer(ev);
     });
   }
@@ -793,8 +804,25 @@ class EzvizTimelineCard extends HTMLElement {
     if (!slot || !this._hass) return;
     slot.innerHTML = '';
     this._origControls = undefined;
+
     const entity = this._config.camera_entity;
     const state = this._hass.states[entity];
+
+    // Show offline state when the camera entity is unavailable/unknown/missing
+    const isOffline = !state || state.state === 'unavailable' || state.state === 'unknown';
+    if (isOffline) {
+      slot.innerHTML = `<div class="placeholder offline">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7">
+          <path d="M2 2l20 20"/>
+          <rect x="2" y="6" width="13" height="12" rx="2"/>
+          <path d="M16 10l5-3v10l-5-3"/>
+        </svg>
+        <strong>Device Offline</strong>
+        <small>Camera entity <code>${this._escape(entity)}</code> is unavailable.<br>The live view will resume automatically once the camera comes back online.</small>
+      </div>`;
+      return;
+    }
+
     const useHls = !!customElements.get('ha-hls-player');
     const player = document.createElement(useHls ? 'ha-hls-player' : 'ha-camera-stream');
     player.hass = this._hass;
@@ -802,7 +830,7 @@ class EzvizTimelineCard extends HTMLElement {
       player.entityid = entity;
       player.autoPlay = true;
       player.playsInline = true;
-    } else if (state) {
+    } else {
       const attrs = { ...(state.attributes || {}) };
       delete attrs.frontend_stream_type;
       player.stateObj = { ...state, attributes: attrs };
@@ -849,7 +877,7 @@ class EzvizTimelineCard extends HTMLElement {
     const seq = ++this._waitSeq;
     this._activeRecord = rec;
     this._showArchivePlayer(rec, offsetSeconds);
-    this._showMessage('Meminta media dari Home Assistant…');
+    this._showMessage('Requesting media from Home Assistant…');
     try {
       const media = await this._hass.callWS({
         type: 'media_source/resolve_media',
@@ -864,19 +892,19 @@ class EzvizTimelineCard extends HTMLElement {
       const details = String(err?.message || err || 'Unknown media resolution error');
       const isDownload = /download runs in the background|downloading|uncached|download.*background|check this notification/i.test(details);
       if (isDownload) {
-        this._showMessage('Rekaman belum ada di cache. Download berjalan di background Home Assistant; kartu akan memeriksa cache otomatis.');
+        this._showMessage('Recording is not in cache yet. Download is running in the background on Home Assistant; the card will poll the cache automatically.');
         this._showWaitingPlayer(rec);
         this._waitForCache(rec, offsetSeconds, seq);
       } else {
-        this._showMessage(`Gagal membuka rekaman: ${details}`);
-        this._showErrorPlayer('Rekaman belum bisa dibuka', details);
+        this._showMessage(`Failed to open recording: ${details}`);
+        this._showErrorPlayer('Recording cannot be opened', details);
       }
     }
   }
 
   async _attachVideo(rawUrl, mimeType, rec, offsetSeconds, seq) {
     let url = rawUrl;
-    if (typeof url !== 'string' || !url) throw new Error('Home Assistant tidak mengembalikan URL media.');
+    if (typeof url !== 'string' || !url) throw new Error('Home Assistant did not return a media URL.');
     if (url.startsWith('/')) {
       try {
         const signed = await this._hass.callWS({ type: 'auth/sign_path', path: url, expires: 3600 });
@@ -897,7 +925,7 @@ class EzvizTimelineCard extends HTMLElement {
     }
     video.addEventListener('error', () => {
       if (seq !== this._waitSeq) return;
-      this._showMessage('Video sudah terselesaikan, tetapi browser gagal memutar format/codec-nya. Periksa codec H.264/H.265 rekaman EZVIZ.');
+      this._showMessage('Video resolved successfully, but the browser failed to play its format/codec. Check the H.264/H.265 codec of the EZVIZ recording.');
     }, { once: true });
     video.addEventListener('loadedmetadata', () => {
       const info = this.shadowRoot.querySelector('#selected-info');
@@ -912,7 +940,7 @@ class EzvizTimelineCard extends HTMLElement {
   _showWaitingPlayer(rec) {
     const slot = this.shadowRoot.querySelector('#playback-slot');
     if (!slot) return;
-    slot.innerHTML = `<div class="placeholder"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M12 3v10m0 0 4-4m-4 4-4-4"/><path d="M5 15v4a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2v-4"/></svg><strong>Downloading to HA cache</strong><small>${this._escape(rec.timeLabel)}<br>Jangan tutup kartu bila ingin menunggu. Bisa juga tekan Refresh setelah notifikasi download sukses.</small></div>`;
+    slot.innerHTML = `<div class="placeholder"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M12 3v10m0 0 4-4m-4 4-4-4"/><path d="M5 15v4a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2v-4"/></svg><strong>Downloading to HA cache</strong><small>${this._escape(rec.timeLabel)}<br>Do not close the card if you want to keep waiting. You can also press Refresh after the download success notification.</small></div>`;
   }
 
   _showErrorPlayer(title, details) {
@@ -941,11 +969,11 @@ class EzvizTimelineCard extends HTMLElement {
           return;
         }
       } catch (_) {}
-      if (n % 3 === 2) this._showMessage(`Menunggu cache EZVIZ… (${Math.floor((n + 1) * 5 / 60)} menit). Status download ada di Notifications Home Assistant.`);
+      if (n % 3 === 2) this._showMessage(`Waiting for EZVIZ cache… (${Math.floor((n + 1) * 5 / 60)} minutes). Download status is in Home Assistant Notifications.`);
     }
     if (seq === this._waitSeq) {
-      this._showMessage('Kartu berhenti menunggu setelah 5 menit. Periksa notifikasi EZVIZ SD Card Recordings; jika sudah sukses, tekan Refresh lalu klik segmen lagi.');
-      this._showErrorPlayer('Menunggu cache terlalu lama', 'Download mungkin gagal atau masih berlangsung. Periksa Notifications dan log integrasi EZVIZ.');
+      this._showMessage('Card stopped waiting after 5 minutes. Check the EZVIZ SD Card Recordings notification; if it succeeded, press Refresh then click the segment again.');
+      this._showErrorPlayer('Waited for cache too long', 'Download may have failed or is still in progress. Check Notifications and the EZVIZ integration log.');
     }
   }
 
@@ -962,13 +990,13 @@ class EzvizTimelineCard extends HTMLElement {
       this._renderTimeline();
       this._renderRecordList();
       this._setTimelineState(this._records.length ? `${this._records.length} archive segments` : 'No recordings in this day');
-      if (!this._records.length) this._showMessage('Tidak ada rekaman yang dilaporkan Media Source untuk tanggal ini. Pastikan tanggal memiliki arsip EZVIZ.');
+      if (!this._records.length) this._showMessage('No recordings were reported by the Media Source for this date. Make sure this date has an EZVIZ archive.');
     } catch (err) {
       this._records = [];
       this._renderTimeline();
       this._renderRecordList();
       this._setTimelineState('Could not load archive');
-      this._showMessage(`Tidak dapat membaca arsip EZVIZ: ${String(err?.message || err)}. Pastikan integrasi EZVIZ aktif dan entry ID benar.`);
+      this._showMessage(`Could not read the EZVIZ archive: ${String(err?.message || err)}. Make sure the EZVIZ integration is active and the entry ID is correct.`);
     } finally {
       this._loading = false;
     }
@@ -1037,7 +1065,7 @@ class EzvizTimelineCard extends HTMLElement {
     if (!list) return;
     if (count) count.textContent = `${this._records.length} clip${this._records.length === 1 ? '' : 's'}`;
     if (!this._records.length) {
-      list.innerHTML = '<div class="empty">Tidak ada rekaman pada tanggal ini.</div>';
+      list.innerHTML = '<div class="empty">No recordings on this date.</div>';
       return;
     }
     const newest = [...this._records].sort((a,b) => b.start - a.start);
@@ -1142,8 +1170,8 @@ class EzvizTimelineCard extends HTMLElement {
   }
   _formatTime(epoch, options = {hour:'2-digit',minute:'2-digit',second:'2-digit'}) {
     const zone = this._hass?.config?.time_zone || Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC';
-    try { return new Intl.DateTimeFormat('id-ID', {...options, timeZone:zone, hourCycle:'h23'}).format(new Date(epoch * 1000)); }
-    catch (_) { return new Date(epoch * 1000).toLocaleTimeString([], options); }
+    try { return new Intl.DateTimeFormat('en-GB', {...options, timeZone:zone, hourCycle:'h23'}).format(new Date(epoch * 1000)); }
+    catch (_) { return new Date(epoch * 1000).toLocaleTimeString('en-GB', options); }
   }
   _clockLabel(epoch) { return this._formatTime(epoch); }
   _fmtDuration(seconds) { if (!Number.isFinite(seconds)) return 'unknown'; const n = Math.max(0, Math.floor(seconds)); const h = Math.floor(n/3600), m=Math.floor(n%3600/60), s=n%60; return h ? `${h}:${String(m).padStart(2,'0')}:${String(s).padStart(2,'0')}` : `${m}:${String(s).padStart(2,'0')}`; }
