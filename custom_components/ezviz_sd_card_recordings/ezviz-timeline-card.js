@@ -1,7 +1,8 @@
 /*
  * EZVIZ Timeline Card for Home Assistant
  * Simplified: live view by default, playback panel on demand.
- * Includes: player zoom, fullscreen, PTZ, and dynamic entity panel.
+ * Includes: player zoom, fullscreen, PTZ, dynamic entity panel,
+ * auto-reconnect, and live-edge catch-up.
  * Licensed under the MIT License.
  */
 const CARD_TAG = 'ezviz-timeline-card';
@@ -34,6 +35,19 @@ class EzvizTimelineCard extends HTMLElement {
     this._otherEntities = [];
     this._onDocFullscreenChange = null;
     this._onDocKeydown = null;
+    // Cached DOM references used by _setZoom during pan frames
+    this._cachedPlayer = null;
+    this._cachedHint = null;
+    this._cachedVideo = null;
+    // Live watchdog state
+    this._liveVideoEl = null;
+    this._liveVideoHandlers = null;
+    this._liveSyncTimer = null;
+    this._liveRetryTimer = null;
+    this._liveBuffering = false;
+    this._liveRetryCount = 0;
+    this._lastSeekAt = 0;
+    this._onVisibilityChange = null;
   }
 
   setConfig(config) {
@@ -62,6 +76,8 @@ class EzvizTimelineCard extends HTMLElement {
       default_date: config.default_date || '',
       window_hours: [6, 12, 24].includes(Number(config.window_hours)) ? Number(config.window_hours) : 24,
       refresh_seconds: Math.max(15, Number(config.refresh_seconds || 60)),
+      live_sync_seconds: Math.max(0, Number(config.live_sync_seconds ?? 5)),
+      live_reconnect: config.live_reconnect !== false,
       ptz,
       other,
     };
@@ -75,12 +91,11 @@ class EzvizTimelineCard extends HTMLElement {
     const oldHass = this._hass;
     this._hass = hass;
     if (!this._config) return;
-    const player = this.shadowRoot.querySelector('#live-slot ha-hls-player, #live-slot ha-camera-stream');
+    const player = this.shadowRoot.querySelector('#live-slot ha-camera-stream, #live-slot ha-hls-player');
     if (player) player.hass = hass;
     if (!this._started) { this._start(); return; }
 
-    // Re-mount live player if the camera availability changed while on Live tab
-    if (oldHass && this._tab === 'live') {
+    if (oldHass && this._tab !== 'playback') {
       const oldState = oldHass.states[this._config.camera_entity];
       const newState = hass.states[this._config.camera_entity];
       const oldOffline = !oldState || oldState.state === 'unavailable' || oldState.state === 'unknown';
@@ -100,8 +115,13 @@ class EzvizTimelineCard extends HTMLElement {
     if (this._refreshTimer) clearInterval(this._refreshTimer);
     this._refreshTimer = null;
     this._waitSeq++;
+    this._clearLiveWatchers();
     if (this._onDocFullscreenChange) document.removeEventListener('fullscreenchange', this._onDocFullscreenChange);
     if (this._onDocKeydown) document.removeEventListener('keydown', this._onDocKeydown);
+    if (this._onVisibilityChange) {
+      document.removeEventListener('visibilitychange', this._onVisibilityChange);
+      this._onVisibilityChange = null;
+    }
   }
 
   async _start() {
@@ -129,11 +149,11 @@ class EzvizTimelineCard extends HTMLElement {
         .card{overflow:hidden;border-radius:18px;background:${this._config?.theme==='light'?'#f7f9fc':'#10151d'};color:${this._config?.theme==='light'?'#17212c':'#e8eef6'};border:1px solid ${this._config?.theme==='light'?'#dce3eb':'#26303d'};box-shadow:0 10px 32px rgba(0,0,0,.16)}
         .head{padding:12px 16px;border-bottom:1px solid ${this._config?.theme==='light'?'#e0e6ed':'#28313d'}}
         .title{font-weight:750;font-size:15px;letter-spacing:.1px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-        .player{position:relative;aspect-ratio:16/9;background:#05070a;overflow:hidden;display:flex;justify-content:center;align-items:center}
+        .player{position:relative;aspect-ratio:16/9;background:#05070a;overflow:hidden;display:flex;justify-content:center;align-items:center;touch-action:pan-y}
         .player:fullscreen{aspect-ratio:unset;width:100vw;height:100vh;background:#000;border-radius:0}
-        .player-layer{position:absolute;inset:0;transition:transform .05s linear;will-change:transform}
+        .player-layer{position:absolute;inset:0;will-change:transform}
         .player-layer.hidden{display:none}
-        .player-layer ha-hls-player,.player-layer ha-camera-stream,.player-layer video{display:block;width:100%;height:100%;object-fit:contain;background:#05070a;border:0}
+        .player-layer ha-camera-stream,.player-layer ha-hls-player,.player-layer video{display:block;width:100%;height:100%;object-fit:contain;background:#05070a;border:0}
         .player-layer video{max-height:none;min-height:0}
         .placeholder{position:absolute;inset:0;display:flex;flex-direction:column;align-items:center;justify-content:center;text-align:center;padding:22px;gap:10px;color:#aab7c7;background:#05070a}
         .placeholder svg{width:36px;height:36px;color:var(--ez-accent)}
@@ -145,8 +165,14 @@ class EzvizTimelineCard extends HTMLElement {
         .pctrl{background:transparent;border:0;color:#f3f7fa;width:28px;height:28px;border-radius:6px;font-size:16px;display:grid;place-items:center;line-height:1;padding:0}
         .pctrl:hover{background:rgba(255,255,255,.16)}
         .pctrl svg{width:15px;height:15px;pointer-events:none}
+        /* Fullscreen button only appears when native controls are hidden (zoom > 1.0) */
+        .pfullscreen{display:none}
+        .player.zoomed .pfullscreen{display:grid}
+        .player.zoomed{touch-action:none}
         .zoom-hint{position:absolute;bottom:10px;left:10px;z-index:10;background:rgba(5,9,14,.72);backdrop-filter:blur(10px);color:#f3f7fa;padding:4px 8px;border-radius:6px;font-size:10px;font-weight:700;display:none;border:1px solid rgba(255,255,255,.08)}
         .zoom-hint.visible{display:block}
+        .retry-btn{background:var(--ez-accent);border:0;border-radius:8px;padding:8px 14px;color:#071b1a;font-weight:700;font-size:12px;margin-top:6px}
+        .retry-btn:hover{filter:brightness(1.1)}
         .mode-bar{display:flex;align-items:center;gap:6px;padding:10px 12px;border-top:1px solid ${this._config?.theme==='light'?'#e0e6ed':'#28313d'};overflow-x:auto;scrollbar-width:none}
         .mode-bar::-webkit-scrollbar{display:none}
         .mode-btn{flex:1 0 auto;display:flex;align-items:center;justify-content:center;gap:6px;background:${this._config?.theme==='light'?'#e9eef4':'#1a222e'};color:inherit;border:0;border-radius:10px;padding:9px 14px;font-size:12px;font-weight:650;white-space:nowrap;transition:background .15s}
@@ -254,7 +280,7 @@ class EzvizTimelineCard extends HTMLElement {
           <div class="player-ctrls">
             <button class="pctrl" data-player-action="zoom-out" title="Zoom out">−</button>
             <button class="pctrl" data-player-action="zoom-in" title="Zoom in">+</button>
-            <button class="pctrl" data-player-action="fullscreen" title="Fullscreen">
+            <button class="pctrl pfullscreen" data-player-action="fullscreen" title="Fullscreen">
               <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M8 3H5a2 2 0 0 0-2 2v3M21 8V5a2 2 0 0 0-2-2h-3M3 16v3a2 2 0 0 0 2 2h3M16 21h3a2 2 0 0 0 2-2v-3"/></svg>
             </button>
           </div>
@@ -342,12 +368,13 @@ class EzvizTimelineCard extends HTMLElement {
     this._onDocFullscreenChange = () => {
       const player = this.shadowRoot?.querySelector('#player');
       if (!player) return;
-      const isFs = document.fullscreenElement === player;
-      if (!isFs) this._resetZoom();
+      const fsEl = document.fullscreenElement || document.webkitFullscreenElement
+        || document.mozFullScreenElement || document.msFullscreenElement;
+      if (!fsEl) this._resetZoom();
     };
     document.addEventListener('fullscreenchange', this._onDocFullscreenChange);
     this._onDocKeydown = (ev) => {
-      if (ev.key === 'Escape' && document.fullscreenElement) {
+      if (ev.key === 'Escape' && (document.fullscreenElement || document.webkitFullscreenElement)) {
         // browser handles exit, our fullscreenchange listener resets zoom
       }
     };
@@ -367,6 +394,13 @@ class EzvizTimelineCard extends HTMLElement {
         if (action === 'zoom-in') this._stepZoom(1.4);
         else if (action === 'zoom-out') this._stepZoom(1 / 1.4);
         else if (action === 'fullscreen') this._toggleFullscreen();
+        return;
+      }
+
+      const retryLive = ev.target.closest('#retry-live');
+      if (retryLive) {
+        this._liveRetryCount = 0;
+        this._mountLivePlayer();
         return;
       }
 
@@ -548,27 +582,38 @@ class EzvizTimelineCard extends HTMLElement {
     tx = Math.max(-maxTx, Math.min(maxTx, tx));
     ty = Math.max(-maxTy, Math.min(maxTy, ty));
     this._zoom = { scale, tx, ty };
-    const player = this.shadowRoot.querySelector('#player');
-    const hint = this.shadowRoot.querySelector('#zoom-hint');
-    const video = this._findVideo(layer);
+
+    // Cache static DOM references; querying #player / #zoom-hint / scanning
+    // the shadow tree for the <video> element on every pan frame is expensive
+    // on mobile and made dragging feel sluggish.
+    if (!this._cachedPlayer) this._cachedPlayer = this.shadowRoot.querySelector('#player');
+    if (!this._cachedHint) this._cachedHint = this.shadowRoot.querySelector('#zoom-hint');
+    const player = this._cachedPlayer;
+    const hint = this._cachedHint;
+
     if (scale < 1.01) {
       layer.style.transform = '';
-      player?.classList.remove('zoomed');
+      player?.classList.remove('zoomed', 'panning');
       hint?.classList.remove('visible');
+      this._cachedVideo = null;
+      const video = this._findVideo(layer);
       if (video && this._origControls !== undefined) {
         try { video.controls = this._origControls; } catch (_) {}
       }
     } else {
       layer.style.transform = `translate(${tx}px, ${ty}px) scale(${scale})`;
-      layer.style.transformOrigin = 'center center';
       player?.classList.add('zoomed');
       if (hint) {
         hint.classList.add('visible');
         hint.textContent = `${Math.round(scale * 100)}%`;
       }
+      if (!this._cachedVideo) this._cachedVideo = this._findVideo(layer);
+      const video = this._cachedVideo;
       if (video) {
         if (this._origControls === undefined) this._origControls = video.controls;
-        try { video.controls = false; } catch (_) {}
+        if (video.controls) {
+          try { video.controls = false; } catch (_) {}
+        }
       }
     }
   }
@@ -581,6 +626,7 @@ class EzvizTimelineCard extends HTMLElement {
   _resetZoom() {
     this._zoom = { scale: 1, tx: 0, ty: 0 };
     this._origControls = undefined;
+    this._cachedVideo = null;
     ['#live-layer', '#playback-layer'].forEach(sel => {
       const layer = this.shadowRoot?.querySelector(sel);
       if (!layer) return;
@@ -597,19 +643,31 @@ class EzvizTimelineCard extends HTMLElement {
   _toggleFullscreen() {
     const player = this.shadowRoot.querySelector('#player');
     if (!player) return;
-    if (document.fullscreenElement === player) {
-      document.exitFullscreen?.();
-    } else {
-      const req = player.requestFullscreen || player.webkitRequestFullscreen || player.mozRequestFullScreen || player.msRequestFullscreen;
-      if (req) req.call(player).catch(err => console.warn('Fullscreen failed:', err));
+    // Detect ANY fullscreen element (standard + vendor prefixes).
+    // A native <video> may be the fullscreen element instead of our
+    // container — still exit it so the button never appears dead.
+    const fsEl = document.fullscreenElement
+      || document.webkitFullscreenElement
+      || document.mozFullScreenElement
+      || document.msFullscreenElement;
+    if (fsEl) {
+      if (document.exitFullscreen) document.exitFullscreen().catch(() => {});
+      else if (document.webkitExitFullscreen) document.webkitExitFullscreen();
+      else if (document.mozCancelFullScreen) document.mozCancelFullScreen();
+      else if (document.msExitFullscreen) document.msExitFullscreen();
+      return;
     }
+    const req = player.requestFullscreen
+      || player.webkitRequestFullscreen
+      || player.mozRequestFullScreen
+      || player.msRequestFullscreen;
+    if (req) req.call(player).catch(err => console.warn('Fullscreen failed:', err));
   }
 
   _setupZoomGestures() {
     const player = this.shadowRoot.querySelector('#player');
     if (!player) return;
 
-    // Wheel zoom (Ctrl+wheel always zooms; plain wheel zooms only when already zoomed)
     player.addEventListener('wheel', (ev) => {
       if (this._zoom.scale <= 1.01 && !ev.ctrlKey) return;
       ev.preventDefault();
@@ -626,14 +684,18 @@ class EzvizTimelineCard extends HTMLElement {
       this._setZoom(newScale, newTx, newTy);
     }, { passive: false });
 
-    // Double-click / double-tap: reset zoom
     player.addEventListener('dblclick', (ev) => {
       ev.preventDefault();
       if (this._zoom.scale > 1.01) this._resetZoom();
     });
 
-    // Pointer Events for pinch (2 fingers) and pan (when zoomed)
     player.addEventListener('pointerdown', (ev) => {
+      // Never hijack pointer events from the card's overlay controls.
+      // Without this guard, pointer capture steals the click from the
+      // fullscreen button when the player is zoomed (pan mode active),
+      // which makes fullscreen exit appear broken.
+      if (ev.target?.closest?.('.player-ctrls')) return;
+
       if (ev.pointerType === 'mouse' && ev.button !== 0) return;
       this._pointers.set(ev.pointerId, { x: ev.clientX, y: ev.clientY });
       if (this._pointers.size === 2) {
@@ -670,13 +732,140 @@ class EzvizTimelineCard extends HTMLElement {
       if (this._pointers.size === 0) {
         this._panStart = null;
         player.classList.remove('panning');
+      } else if (this._pointers.size === 1 && this._zoom.scale > 1.01) {
+        // Pinch ended but one finger remains. Promote it to pan mode so the
+        // user can keep dragging without lifting and re-touching — otherwise
+        // pan only starts on a fresh pointerdown and the gesture feels heavy.
+        const remaining = this._pointers.values().next().value;
+        this._panStart = { x: remaining.x, y: remaining.y, tx: this._zoom.tx, ty: this._zoom.ty };
+        player.classList.add('panning');
       }
     };
     player.addEventListener('pointerup', endPointer);
     player.addEventListener('pointercancel', endPointer);
-    player.addEventListener('pointerleave', (ev) => {
-      if (this._pointers.size > 0) endPointer(ev);
-    });
+    // No pointerleave handler: touch pointer capture guarantees pointerup and
+    // pointercancel fire even when the finger leaves the element, so
+    // pointerleave would only cancel an active pan mid-drag.
+  }
+
+  /* ============ Live watchdog: auto-reconnect + live-edge catch-up ============ */
+
+  _clearLiveWatchers() {
+    if (this._liveSyncTimer) { clearInterval(this._liveSyncTimer); this._liveSyncTimer = null; }
+    if (this._liveRetryTimer) { clearTimeout(this._liveRetryTimer); this._liveRetryTimer = null; }
+    if (this._liveVideoHandlers) {
+      const { video, onPlaying, onWaiting, onError } = this._liveVideoHandlers;
+      try {
+        video.removeEventListener('playing', onPlaying);
+        video.removeEventListener('waiting', onWaiting);
+        video.removeEventListener('error', onError);
+      } catch (_) {}
+      this._liveVideoHandlers = null;
+      this._liveVideoEl = null;
+    }
+    this._liveBuffering = false;
+  }
+
+  _attachLiveWatchers(retry = 0) {
+    if (!this.isConnected) return;
+    if (this._tab === 'playback') return;
+    const slot = this.shadowRoot?.querySelector('#live-slot');
+    if (!slot) return;
+    const video = this._findVideo(slot);
+    if (!video) {
+      if (retry < 12) setTimeout(() => this._attachLiveWatchers(retry + 1), 500);
+      return;
+    }
+    if (this._liveVideoHandlers && this._liveVideoEl === video) return;
+    this._clearLiveWatchers();
+
+    const onPlaying = () => {
+      this._liveBuffering = false;
+      this._liveRetryCount = 0;
+      // Give the player a moment to settle before checking live edge
+      setTimeout(() => this._syncLiveEdge(true), 500);
+    };
+    const onWaiting = () => { this._liveBuffering = true; };
+    const onError = () => { this._handleLiveError(); };
+
+    video.addEventListener('playing', onPlaying);
+    video.addEventListener('waiting', onWaiting);
+    video.addEventListener('error', onError);
+
+    this._liveVideoEl = video;
+    this._liveVideoHandlers = { video, onPlaying, onWaiting, onError };
+
+    // Initial sync after the stream stabilizes
+    setTimeout(() => this._syncLiveEdge(true), 1500);
+
+    // Visibility change: on return to tab, snap back to live
+    if (!this._onVisibilityChange) {
+      this._onVisibilityChange = () => {
+        if (document.visibilityState === 'visible' && this._tab !== 'playback') {
+          setTimeout(() => this._syncLiveEdge(true), 300);
+        }
+      };
+      document.addEventListener('visibilitychange', this._onVisibilityChange);
+    }
+  }
+
+  _syncLiveEdge(force = false) {
+    if (!this.isConnected) return;
+    if (this._tab === 'playback') return;
+    if (this._liveBuffering) return;
+    const threshold = Number(this._config?.live_sync_seconds ?? 5);
+    if (threshold <= 0) return;
+
+    const now = Date.now();
+    // Cooldown: avoid seek storms on flaky connections
+    if (!force && now - this._lastSeekAt < 15000) return;
+
+    const slot = this.shadowRoot?.querySelector('#live-slot');
+    if (!slot) return;
+    const video = this._findVideo(slot);
+    if (!video || video.paused || video.ended) return;
+    if (!video.seekable || video.seekable.length === 0) return;
+
+    try {
+      const liveEdge = video.seekable.end(video.seekable.length - 1);
+      // WebRTC streams often report Infinity; skip them — they are already live
+      if (!isFinite(liveEdge) || liveEdge <= 0) return;
+      const drift = liveEdge - video.currentTime;
+      if (drift > threshold) {
+        this._lastSeekAt = now;
+        // Land 1s behind the live edge to give HLS room to refill
+        video.currentTime = Math.max(0, liveEdge - 1);
+      }
+    } catch (_) {}
+  }
+
+  _handleLiveError() {
+    if (!this.isConnected) return;
+    if (this._tab === 'playback') return;
+    if (this._config?.live_reconnect === false) return;
+    if (this._liveRetryTimer) return; // already scheduled
+
+    this._liveRetryCount++;
+    if (this._liveRetryCount > 3) {
+      const slot = this.shadowRoot?.querySelector('#live-slot');
+      if (!slot) return;
+      slot.innerHTML = `<div class="placeholder offline">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7">
+          <circle cx="12" cy="12" r="9"/><path d="M12 7v6m0 4h.01"/>
+        </svg>
+        <strong>Live stream lost</strong>
+        <small>The stream could not be restored automatically.<br>Tap Reconnect, or switch tabs and come back.</small>
+        <button class="retry-btn" id="retry-live">Reconnect</button>
+      </div>`;
+      return;
+    }
+
+    const delay = Math.min(15000, 2000 * Math.pow(2, this._liveRetryCount - 1));
+    console.info(`EZVIZ live stream error, retrying in ${delay}ms (attempt ${this._liveRetryCount}/3)`);
+    this._liveRetryTimer = setTimeout(() => {
+      this._liveRetryTimer = null;
+      if (this.isConnected && this._tab !== 'playback') this._mountLivePlayer();
+    }, delay);
   }
 
   /* ============ Tab switching ============ */
@@ -690,6 +879,8 @@ class EzvizTimelineCard extends HTMLElement {
     const playbackLayer = this.shadowRoot.querySelector('#playback-layer');
 
     if (tab === 'playback') {
+      // Live watchdog is not needed while viewing archive
+      this._clearLiveWatchers();
       liveLayer?.classList.add('hidden');
       playbackLayer?.classList.remove('hidden');
       if (prevTab !== 'playback') {
@@ -703,6 +894,12 @@ class EzvizTimelineCard extends HTMLElement {
       if (vid) try { vid.pause(); } catch (_) {}
       if (!this.shadowRoot.querySelector('#live-slot').children.length) {
         this._mountLivePlayer();
+      } else {
+        // Live layer was hidden — reattach watchers and snap to live
+        setTimeout(() => {
+          this._attachLiveWatchers();
+          this._syncLiveEdge(true);
+        }, 300);
       }
     }
 
@@ -802,13 +999,14 @@ class EzvizTimelineCard extends HTMLElement {
   _mountLivePlayer() {
     const slot = this.shadowRoot.querySelector('#live-slot');
     if (!slot || !this._hass) return;
+    this._clearLiveWatchers();
     slot.innerHTML = '';
     this._origControls = undefined;
+    this._cachedVideo = null;
 
     const entity = this._config.camera_entity;
     const state = this._hass.states[entity];
 
-    // Show offline state when the camera entity is unavailable/unknown/missing
     const isOffline = !state || state.state === 'unavailable' || state.state === 'unknown';
     if (isOffline) {
       slot.innerHTML = `<div class="placeholder offline">
@@ -823,22 +1021,30 @@ class EzvizTimelineCard extends HTMLElement {
       return;
     }
 
-    const useHls = !!customElements.get('ha-hls-player');
-    const player = document.createElement(useHls ? 'ha-hls-player' : 'ha-camera-stream');
+    // Prefer ha-camera-stream: it picks WebRTC (go2rtc) when the camera
+    // supports it, giving sub-second latency and much faster startup.
+    // Fall back to ha-hls-player only if ha-camera-stream is unavailable.
+    const useCameraStream = !!customElements.get('ha-camera-stream');
+    const useHls = !useCameraStream && !!customElements.get('ha-hls-player');
+    const player = document.createElement(useCameraStream ? 'ha-camera-stream' : useHls ? 'ha-hls-player' : 'div');
     player.hass = this._hass;
-    if (useHls) {
-      player.entityid = entity;
-      player.autoPlay = true;
-      player.playsInline = true;
-    } else {
+
+    if (useCameraStream) {
       const attrs = { ...(state.attributes || {}) };
       delete attrs.frontend_stream_type;
       player.stateObj = { ...state, attributes: attrs };
+    } else if (useHls) {
+      player.entityid = entity;
+      player.autoPlay = true;
+      player.playsInline = true;
     }
     player.controls = true;
     player.muted = true;
     player.style.cssText = 'width:100%;height:100%;display:block;background:#05070a';
     slot.appendChild(player);
+
+    // Attach watchdog after the DOM settles
+    setTimeout(() => this._attachLiveWatchers(), 800);
   }
 
   _showPlaybackEmpty() {
@@ -861,6 +1067,7 @@ class EzvizTimelineCard extends HTMLElement {
     const slot = this.shadowRoot.querySelector('#playback-slot');
     if (!slot) return;
     this._origControls = undefined;
+    this._cachedVideo = null;
     slot.innerHTML = `<div class="placeholder"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><circle cx="12" cy="12" r="9"/><path d="m10 8 6 4-6 4z"/></svg><strong>Preparing recording…</strong><small>${this._escape(rec.timeLabel)} · Resolve media</small></div>`;
     this._activeRecord = rec;
     const info = this.shadowRoot.querySelector('#selected-info');
@@ -914,6 +1121,7 @@ class EzvizTimelineCard extends HTMLElement {
     if (seq !== this._waitSeq) return;
     const slot = this.shadowRoot.querySelector('#playback-slot');
     this._origControls = undefined;
+    this._cachedVideo = null;
     slot.innerHTML = `<video id="archive-video" controls playsinline preload="metadata"></video><div style="position:absolute;left:10px;bottom:10px;padding:5px 8px;background:rgba(0,0,0,.7);border-radius:7px;color:#fff;font-size:10px;pointer-events:none">${this._escape(rec.timeLabel)} · ${this._escape(mimeType)}</div>`;
     const video = slot.querySelector('#archive-video');
     video.style.cssText = 'width:100%;height:100%;object-fit:contain;background:#05070a';
@@ -946,7 +1154,7 @@ class EzvizTimelineCard extends HTMLElement {
   _showErrorPlayer(title, details) {
     const slot = this.shadowRoot.querySelector('#playback-slot');
     if (!slot) return;
-    slot.innerHTML = `<div class="placeholder"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><circle cx="12" cy="12" r="9"/><path d="M12 7v6m0 4h.01"/></svg><strong>${this._escape(title)}</strong><small>${this._escape(details)}</small><button id="try-again" style="background:var(--ez-accent);border:0;border-radius:8px;padding:8px 12px;color:#071b1a;font-weight:700">Try again</button></div>`;
+    slot.innerHTML = `<div class="placeholder"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><circle cx="12" cy="12" r="9"/><path d="M12 7v6m0 4h.01"/></svg><strong>${this._escape(title)}</strong><small>${this._escape(details)}</small><button class="retry-btn" id="try-again">Try again</button></div>`;
     slot.querySelector('#try-again')?.addEventListener('click', () => this._playRecord(this._activeRecord, 0));
   }
 
