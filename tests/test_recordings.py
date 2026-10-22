@@ -1,19 +1,33 @@
 """Offline tests for the descriptor normalization helpers."""
 
-import unittest
 import importlib.util
-from pathlib import Path
+import unittest
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from zoneinfo import ZoneInfo
 
-_HELPER_PATH = (
+_COMPONENT_DIR = (
     Path(__file__).resolve().parents[1]
-    / "custom_components" / "ezviz_sd_card_recordings" / "recordings.py"
+    / "custom_components" / "ezviz_sd_card_recordings"
 )
-_SPEC = importlib.util.spec_from_file_location("ezviz_recordings_helpers", _HELPER_PATH)
-assert _SPEC is not None and _SPEC.loader is not None
-_HELPERS = importlib.util.module_from_spec(_SPEC)
-_SPEC.loader.exec_module(_HELPERS)
+
+
+def _load_module(name: str):
+    """Load a module from the integration folder without requiring HA imports.
+
+    The two modules exercised here (``recordings`` and ``const``) only use
+    the Python standard library, so they can be loaded directly by path and
+    do not need a running Home Assistant instance in the CI sandbox.
+    """
+    path = _COMPONENT_DIR / f"{name}.py"
+    spec = importlib.util.spec_from_file_location(f"ezviz_{name}", path)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+_HELPERS = _load_module("recordings")
 direct_https_url = _HELPERS.direct_https_url
 format_native_playback_timestamp = _HELPERS.format_native_playback_timestamp
 resolve_api_serial = _HELPERS.resolve_api_serial
@@ -21,6 +35,8 @@ format_record_title = _HELPERS.format_record_title
 normalize_records = _HELPERS.normalize_records
 record_key = _HELPERS.record_key
 serial_identity = _HELPERS.serial_identity
+
+_CONST = _load_module("const")
 
 
 class RecordingNormalizationTests(unittest.TestCase):
@@ -34,7 +50,11 @@ class RecordingNormalizationTests(unittest.TestCase):
         items = normalize_records(payload)
         self.assertEqual(len(items), 2)
         self.assertLessEqual(items[0]["start"], items[1]["start"])
-        self.assertEqual(len(items[0]["key"]), 20)
+        # v0.4+ format: HHMMSS_HHMMSS_<hash8> — 22 characters, not the
+        # previous 20-character opaque hash. Assert the shape rather than
+        # the length so future tweaks to the timestamp prefix are visible
+        # in review.
+        self.assertRegex(items[0]["key"], r"^\d{6}_\d{6}_[0-9a-f]{8}$")
 
     def test_iso_time_and_missing_end(self):
         items = normalize_records([{"startTime": "2026-10-16T04:12:03+07:00"}], local_timezone=timezone(timedelta(hours=7)))
@@ -50,11 +70,18 @@ class RecordingNormalizationTests(unittest.TestCase):
         self.assertEqual(items, [])
 
     def test_key_is_stable(self):
-        raw = {"seqId": "abc", "startTime": 123}
-        self.assertEqual(record_key(raw), record_key({"startTime": 123, "seqId": "abc"}))
+        # v0.4+ signature: record_key(raw, start, end). The hash8 component
+        # is derived from a stable descriptor representation, so dict order
+        # and unrelated fields such as downloadUrl must not change the key.
+        start = datetime(2026, 10, 16, 4, 12, 3, tzinfo=timezone.utc)
+        end = datetime(2026, 10, 16, 4, 13, 3, tzinfo=timezone.utc)
         self.assertEqual(
-            record_key({"seqId": "abc", "downloadUrl": "https://one.example/a"}),
-            record_key({"seqId": "abc", "downloadUrl": "https://two.example/b"}),
+            record_key({"seqId": "abc", "startTime": 123}, start, end),
+            record_key({"startTime": 123, "seqId": "abc"}, start, end),
+        )
+        self.assertEqual(
+            record_key({"seqId": "abc", "downloadUrl": "https://one.example/a"}, start, end),
+            record_key({"seqId": "abc", "downloadUrl": "https://two.example/b"}, start, end),
         )
 
     def test_compact_timestamp(self):
@@ -111,6 +138,14 @@ class RecordingNormalizationTests(unittest.TestCase):
         self.assertIsNone(direct_https_url({"playUrl": "ezopen://ABC/1.rec?begin=1"}))
         self.assertIsNone(direct_https_url({"streamUrl": "https://native.example:8554"}))
         self.assertIsNone(direct_https_url({"thumbnailUrl": "https://media.example/preview.jpg"}))
+
+
+class ConstantsTests(unittest.TestCase):
+    def test_sync_notify_defaults_to_on(self):
+        """v0.6+ preserves previous behaviour: users who never touched the
+        toggle keep receiving the sync summary after each 15-minute cycle."""
+        self.assertEqual(_CONST.CONF_SYNC_NOTIFY, "sync_notify")
+        self.assertEqual(_CONST.DEFAULT_SYNC_NOTIFY, "on")
 
 
 if __name__ == "__main__":
