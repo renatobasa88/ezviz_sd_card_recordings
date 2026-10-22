@@ -29,9 +29,11 @@ from .const import (
     CONF_ORDER_DAYS,
     CONF_ORDER_RECORDINGS,
     CONF_SYNC_HOURS,
+    CONF_SYNC_NOTIFY,
     DEFAULT_ORDER_DAYS,
     DEFAULT_ORDER_RECORDINGS,
     DEFAULT_MEDIA_SYNC,
+    DEFAULT_SYNC_NOTIFY,
     DOMAIN,
     LOGGER,
     MEDIA_EVENT_DOWNLOADED,
@@ -406,12 +408,15 @@ class EzvizMediaSource(MediaSource):
                 await self.async_sync_entry(entry_id)
 
     async def async_sync_entry(self, entry_id: str) -> None:
-        """Cache recordings in the configured rolling time window for one camera.
+        """Cache recordings in the configured rolling window and prune expired cache.
 
         The loop tolerates per-day failures: if one day fails (camera busy,
         cloud index lagging for today, or the day is in api.py's cooldown
         window), the loop logs and continues with the remaining days instead
-        of aborting the whole sync window.
+        of aborting the whole sync window. After the loop, cached files whose
+        recording start is older than the rolling cutoff are removed so that
+        a 24-hour sync truly keeps only ~24 hours on disk instead of growing
+        without bound.
         """
         if entry_id in self._syncing:
             return
@@ -460,6 +465,11 @@ class EzvizMediaSource(MediaSource):
                         completed += 1
                 day += timedelta(days=1)
 
+            # Prune cached media whose recording start is outside the rolling
+            # window. This is what makes "24 hours" mean 24 hours on disk, not
+            # an ever-growing pile of recordings.
+            removed_videos, removed_thumbs = await self._async_purge_old_cache(entry_id, cutoff)
+
             if attempted:
                 message = (
                     f"Recent-recording synchronization finished. Cached "
@@ -480,12 +490,36 @@ class EzvizMediaSource(MediaSource):
                     f"Recent-recording synchronization finished. No new "
                     f"recordings in the last {hours} hours."
                 )
-            persistent_notification.async_create(
-                self.hass,
-                message,
-                title=f"{entry.title}: media synchronization",
-                notification_id=f"{DOMAIN}_sync_{entry_id}",
-            )
+            if removed_videos or removed_thumbs:
+                message += (
+                    f" Pruned {removed_videos} expired recording(s) and "
+                    f"{removed_thumbs} thumbnail(s) outside the "
+                    f"{hours}-hour window."
+                )
+                LOGGER.info(
+                    "EZVIZ cache pruned for %s: %d video(s), %d thumbnail(s)",
+                    entry.title, removed_videos, removed_thumbs,
+                )
+
+            notification_id = f"{DOMAIN}_sync_{entry_id}"
+            if entry.options.get(CONF_SYNC_NOTIFY, DEFAULT_SYNC_NOTIFY) == "on":
+                persistent_notification.async_create(
+                    self.hass,
+                    message,
+                    title=f"{entry.title}: media synchronization",
+                    notification_id=notification_id,
+                )
+            else:
+                LOGGER.debug(
+                    "EZVIZ sync summary for %s suppressed (notifications off): %s",
+                    entry.title, message,
+                )
+                # Dismiss any stale notification from a previous run so the
+                # toggle feels immediate for the user.
+                try:
+                    persistent_notification.async_dismiss(self.hass, notification_id)
+                except Exception:
+                    pass
         except Exception as err:
             LOGGER.warning(
                 "EZVIZ recent media synchronization failed (%s)",
@@ -494,6 +528,130 @@ class EzvizMediaSource(MediaSource):
             )
         finally:
             self._syncing.discard(entry_id)
+
+    async def _async_purge_old_cache(self, entry_id: str, cutoff: datetime) -> tuple[int, int]:
+        """Remove cached videos and thumbnails older than the rolling cutoff.
+
+        Folders strictly older than ``cutoff.date()`` are removed wholesale.
+        The cutoff day itself is pruned file-by-file using the HHMMSS prefix
+        of the cached filename (``HHMMSS_HHMMSS_hash8.mp4``), so a 24-hour
+        window at 14:23 only keeps files from yesterday 14:23 onwards. Files
+        whose names do not match that pattern fall back to their mtime, which
+        cleans up pre-v0.4 orphans without touching recently downloaded clips.
+
+        Empty year/month/day folders are pruned on the way out.
+        """
+        entry, _ = self._entry_data(entry_id)
+        root = self._root_path(entry)
+        cutoff_date = cutoff.date()
+        cutoff_ts = cutoff.timestamp()
+        zone = cutoff.tzinfo
+
+        def _purge() -> tuple[int, int]:
+            removed_videos = 0
+            removed_thumbs = 0
+            for kind, ext in (("video", ".mp4"), ("thumb", ".jpg")):
+                base = root / kind
+                if not base.exists():
+                    continue
+                try:
+                    year_dirs = sorted(p for p in base.iterdir() if p.is_dir())
+                except OSError:
+                    continue
+                for year_dir in year_dirs:
+                    try:
+                        year = int(year_dir.name)
+                    except ValueError:
+                        continue
+                    try:
+                        month_dirs = sorted(p for p in year_dir.iterdir() if p.is_dir())
+                    except OSError:
+                        continue
+                    for month_dir in month_dirs:
+                        try:
+                            month = int(month_dir.name)
+                        except ValueError:
+                            continue
+                        try:
+                            day_dirs = sorted(p for p in month_dir.iterdir() if p.is_dir())
+                        except OSError:
+                            continue
+                        for day_dir in day_dirs:
+                            try:
+                                day = int(day_dir.name)
+                                folder_date = date(year, month, day)
+                            except ValueError:
+                                continue
+
+                            # Fast path: entire folder is older than cutoff.
+                            if folder_date < cutoff_date:
+                                try:
+                                    files = [f for f in day_dir.rglob("*") if f.is_file()]
+                                except OSError:
+                                    files = []
+                                if kind == "video":
+                                    removed_videos += len(files)
+                                else:
+                                    removed_thumbs += len(files)
+                                shutil.rmtree(day_dir, ignore_errors=True)
+                                continue
+
+                            # Boundary day: prune individual files.
+                            if folder_date == cutoff_date:
+                                try:
+                                    files = list(day_dir.glob(f"*{ext}"))
+                                except OSError:
+                                    files = []
+                                for file in files:
+                                    should_delete = False
+                                    try:
+                                        hh = int(file.name[0:2])
+                                        mm = int(file.name[2:4])
+                                        ss = int(file.name[4:6])
+                                        start_dt = datetime(year, month, day, hh, mm, ss, tzinfo=zone)
+                                        if start_dt < cutoff:
+                                            should_delete = True
+                                    except (ValueError, IndexError):
+                                        # Unparseable filename (e.g. legacy
+                                        # hash-only naming); fall back to mtime.
+                                        try:
+                                            if file.stat().st_mtime < cutoff_ts:
+                                                should_delete = True
+                                        except OSError:
+                                            continue
+                                    if not should_delete:
+                                        continue
+                                    try:
+                                        file.unlink()
+                                        if kind == "video":
+                                            removed_videos += 1
+                                        else:
+                                            removed_thumbs += 1
+                                    except OSError as err:
+                                        LOGGER.debug("Could not remove %s: %s", file, err)
+                                try:
+                                    if not any(day_dir.iterdir()):
+                                        day_dir.rmdir()
+                                except OSError:
+                                    pass
+
+                        try:
+                            if not any(month_dir.iterdir()):
+                                month_dir.rmdir()
+                        except OSError:
+                            pass
+                    try:
+                        if not any(year_dir.iterdir()):
+                            year_dir.rmdir()
+                    except OSError:
+                        pass
+            return removed_videos, removed_thumbs
+
+        try:
+            return await self.hass.async_add_executor_job(_purge)
+        except Exception as err:
+            LOGGER.warning("EZVIZ cache purge failed (%s)", type(err).__name__, exc_info=True)
+            return 0, 0
 
 
 async def async_get_media_source(hass: HomeAssistant) -> EzvizMediaSource:
