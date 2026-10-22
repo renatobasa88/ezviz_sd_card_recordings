@@ -22,7 +22,7 @@ A Home Assistant custom integration intended to expose EZVIZ camera SD-card reco
 
 **Important limitation:** the native playback dependency is pinned to an open, unmerged upstream pull request. It has reports of manual validation by its author, and has been exercised against H8c and C6N cameras in the Singapore region, but results vary by model and firmware. When selected, a complete clip is downloaded and remuxed before playback; true segmented direct streaming is not implemented.
 
-### Hardware, bandwidth, and camera recommendations
+### Hardware, bandwidth, and camera recommendations (when Media Sync is On)
 
 The integration downloads SD-card recordings from the EZVIZ cloud to local storage. The workload depends almost entirely on **how the camera records**, not on how many days you keep cached. Two profiles matter:
 
