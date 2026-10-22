@@ -50,7 +50,7 @@
       },
       "configure_media": {
         "title": "Konfigurasi Media",
-        "description": "Atur urutan tanggal dan rekaman. Media Sync secara default Off. Jika diaktifkan, integrasi memeriksa rekaman baru setiap 15 menit dan mengunduh rekaman dalam rentang waktu yang dipilih. Video dan thumbnail cache disimpan di .storage/ezviz_sd_card_recordings/[entry_id] secara default. Isi Cold storage path di luar folder config (misalnya /media/ezviz_sd_card_recordings/kamera_depan) agar backup tidak membesar.",
+        "description": "Atur urutan tanggal dan rekaman. Media Sync secara default Off. Jika diaktifkan, integrasi memeriksa rekaman baru setiap 15 menit dan mengunduh rekaman dalam rentang waktu yang dipilih. Rekaman yang lebih lama dari rentang tersebut dihapus otomatis dari cache lokal, sehingga rentang 24 jam hanya menyimpan sekitar 24 jam di disk. Video dan thumbnail cache disimpan di .storage/ezviz_sd_card_recordings/[entry_id] secara default. Isi Cold storage path di luar folder config (misalnya /media/ezviz_sd_card_recordings/kamera_depan) agar backup tidak membesar.",
         "data": {
           "order_days": "Urutan hari di Media Browser",
           "order_recordings": "Urutan rekaman di Media Browser",
@@ -66,15 +66,16 @@
       },
       "sync_window": {
         "title": "Pengaturan Media Sync",
-        "description": "Pilih sinkronisasi otomatis agar 24 jam terakhir selalu diperbarui, atau rentang berjalan manual yang Anda tentukan pada langkah berikutnya. Sinkronisasi berjalan setiap 15 menit. Cold storage path bersifat opsional; kosongkan untuk memakai cache privat default.",
+        "description": "Pilih sinkronisasi otomatis agar 24 jam terakhir selalu diperbarui, atau rentang berjalan manual yang Anda tentukan pada langkah berikutnya. Sinkronisasi berjalan setiap 15 menit dan menghapus rekaman yang berada di luar rentang tersebut. Cold storage path bersifat opsional; kosongkan untuk memakai cache privat default. Notifikasi sinkronisasi hanya mengatur pesan ringkasan setelah tiap sinkronisasi otomatis; unduhan manual per klip tetap memberi notifikasi.",
         "data": {
           "sync_mode": "Rentang sinkronisasi",
-          "cold_storage_path": "Cold storage path (Opsional)"
+          "cold_storage_path": "Cold storage path (Opsional)",
+          "sync_notify": "Notifikasi sinkronisasi"
         }
       },
       "sync_hours": {
         "title": "Rentang sinkronisasi manual",
-        "description": "Masukkan jumlah jam terbaru yang ingin disimpan di cache. Rekaman baru dalam rentang ini akan terambil otomatis saat pemeriksaan tiap 15 menit. Kosongkan untuk memakai default 24 jam. Tidak ada batas maksimum, sehingga SD card berkapasitas besar (misalnya 2 TB yang menampung rekaman bertahun-tahun) bisa disinkronkan penuh bila diinginkan.",
+        "description": "Masukkan jumlah jam terbaru yang ingin disimpan di cache. Rekaman baru dalam rentang ini akan terambil otomatis saat pemeriksaan tiap 15 menit. Rekaman yang lebih lama dari rentang tersebut dihapus otomatis dari cache lokal. Kosongkan untuk memakai default 24 jam. Tidak ada batas maksimum, sehingga SD card berkapasitas besar (misalnya 2 TB yang menampung rekaman bertahun-tahun) bisa disinkronkan penuh bila diinginkan.",
         "data": {
           "sync_hours": "Jumlah jam yang disinkronkan (kosongkan untuk 24)"
         }
