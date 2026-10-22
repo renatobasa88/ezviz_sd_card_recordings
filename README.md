@@ -167,6 +167,8 @@ window_hours: 24
 theme: dark
 accent_color: '#56d4c6'
 refresh_seconds: 60
+live_sync_seconds: 5
+live_reconnect: true
 
 ptz:
   up: button.rumah_depan_rena_tobasa_ptz_up
