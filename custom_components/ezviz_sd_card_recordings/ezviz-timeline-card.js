@@ -2,10 +2,11 @@
  * EZVIZ Timeline Card for Home Assistant
  * Simplified: live view by default, playback panel on demand.
  * Includes: player zoom, fullscreen, PTZ, dynamic entity panel,
- * auto-reconnect, and live-edge catch-up.
+ * auto-reconnect, live-edge catch-up, timeline zoom controls.
  * Licensed under the MIT License.
  */
 const CARD_TAG = 'ezviz-timeline-card';
+const TIMELINE_ZOOM_STEPS = [1, 2, 4, 6, 12, 24];
 
 class EzvizTimelineCard extends HTMLElement {
   constructor() {
@@ -66,6 +67,7 @@ class EzvizTimelineCard extends HTMLElement {
       ? config.other.filter(o => o && o.entity).map(o => ({ entity: String(o.entity), name: o.name || String(o.entity) }))
       : [];
 
+    const requestedHours = Number(config.window_hours);
     this._config = {
       camera_entity: camera,
       ezviz_entry_id: String(entryId),
@@ -74,7 +76,7 @@ class EzvizTimelineCard extends HTMLElement {
       theme: config.theme === 'light' ? 'light' : 'dark',
       accent_color: config.accent_color || '#56d4c6',
       default_date: config.default_date || '',
-      window_hours: [6, 12, 24].includes(Number(config.window_hours)) ? Number(config.window_hours) : 24,
+      window_hours: TIMELINE_ZOOM_STEPS.includes(requestedHours) ? requestedHours : 24,
       refresh_seconds: Math.max(15, Number(config.refresh_seconds || 60)),
       live_sync_seconds: Math.max(0, Number(config.live_sync_seconds ?? 5)),
       live_reconnect: config.live_reconnect !== false,
@@ -142,10 +144,13 @@ class EzvizTimelineCard extends HTMLElement {
     const hasPtz = !!(this._config.ptz && Object.values(this._config.ptz).some(v => v));
     const hasOther = this._config.other && this._config.other.length > 0;
     const tab = this._tab;
+    const zoomIdx = TIMELINE_ZOOM_STEPS.indexOf(this._zoomHours);
+    const canZoomFewer = zoomIdx > 0;
+    const canZoomMore = zoomIdx < TIMELINE_ZOOM_STEPS.length - 1 && zoomIdx >= 0;
     this.shadowRoot.innerHTML = `
       <style>
         :host{display:block;color:var(--primary-text-color);font-family:var(--paper-font-body1_-_font-family,Roboto,Arial,sans-serif);--ez-accent:${this._config?.accent_color||'#56d4c6'};}
-        *{box-sizing:border-box}button,input{font:inherit}button{cursor:pointer}
+        *{box-sizing:border-box}button,input{font:inherit}button{cursor:pointer;touch-action:manipulation}
         .card{overflow:hidden;border-radius:18px;background:${this._config?.theme==='light'?'#f7f9fc':'#10151d'};color:${this._config?.theme==='light'?'#17212c':'#e8eef6'};border:1px solid ${this._config?.theme==='light'?'#dce3eb':'#26303d'};box-shadow:0 10px 32px rgba(0,0,0,.16)}
         .head{padding:12px 16px;border-bottom:1px solid ${this._config?.theme==='light'?'#e0e6ed':'#28313d'}}
         .title{font-weight:750;font-size:15px;letter-spacing:.1px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
@@ -165,7 +170,6 @@ class EzvizTimelineCard extends HTMLElement {
         .pctrl{background:transparent;border:0;color:#f3f7fa;width:28px;height:28px;border-radius:6px;font-size:16px;display:grid;place-items:center;line-height:1;padding:0}
         .pctrl:hover{background:rgba(255,255,255,.16)}
         .pctrl svg{width:15px;height:15px;pointer-events:none}
-        /* Fullscreen button only appears when native controls are hidden (zoom > 1.0) */
         .pfullscreen{display:none}
         .player.zoomed .pfullscreen{display:grid}
         .player.zoomed{touch-action:none}
@@ -188,6 +192,13 @@ class EzvizTimelineCard extends HTMLElement {
         .tool{background:transparent;color:inherit;border:0;border-radius:7px;padding:7px 9px;font-size:11px;font-weight:650}
         .tool:hover{background:rgba(127,149,170,.18)}
         .tool.active{background:var(--ez-accent);color:#071b1a}
+        /* Timeline zoom + / − controls */
+        .zoom-group{display:flex;align-items:center;gap:2px;padding:3px}
+        .zoom-step{width:34px;height:34px;padding:0;display:grid;place-items:center;font-size:18px;font-weight:700;line-height:1}
+        .zoom-step:hover:not(:disabled){background:rgba(127,149,170,.18)}
+        .zoom-step:disabled{opacity:.3;cursor:not-allowed}
+        .zoom-step:disabled:hover{background:transparent}
+        .zoom-label{min-width:40px;text-align:center;font-size:12px;font-weight:700;font-variant-numeric:tabular-nums;user-select:none;padding:0 4px}
         .date{background:${this._config?.theme==='light'?'#fff':'#1a222e'};color:inherit;border:1px solid ${this._config?.theme==='light'?'#d8e0e8':'#303c4c'};border-radius:9px;padding:7px 9px;min-height:34px;color-scheme:${this._config?.theme==='light'?'light':'dark'}}
         .spacer{flex:1}
         .caption{font-size:11px;opacity:.65}
@@ -264,6 +275,10 @@ class EzvizTimelineCard extends HTMLElement {
           .title{font-size:14px}
           .mode-btn{padding:8px 10px;font-size:11px}
           .date{max-width:130px}
+          .zoom-step{width:44px;height:44px;font-size:20px}
+          .zoom-label{min-width:44px;font-size:13px}
+          .timeline{height:84px}
+          .rec{top:14px;height:46px}
         }
       </style>
       <div class="card">
@@ -278,43 +293,43 @@ class EzvizTimelineCard extends HTMLElement {
             <div id="playback-slot" style="position:absolute;inset:0"></div>
           </div>
           <div class="player-ctrls">
-            <button class="pctrl" data-player-action="zoom-out" title="Zoom out">−</button>
-            <button class="pctrl" data-player-action="zoom-in" title="Zoom in">+</button>
-            <button class="pctrl pfullscreen" data-player-action="fullscreen" title="Fullscreen">
+            <button class="pctrl" type="button" data-player-action="zoom-out" title="Zoom out">−</button>
+            <button class="pctrl" type="button" data-player-action="zoom-in" title="Zoom in">+</button>
+            <button class="pctrl pfullscreen" type="button" data-player-action="fullscreen" title="Fullscreen">
               <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M8 3H5a2 2 0 0 0-2 2v3M21 8V5a2 2 0 0 0-2-2h-3M3 16v3a2 2 0 0 0 2 2h3M16 21h3a2 2 0 0 0 2-2v-3"/></svg>
             </button>
           </div>
           <div class="zoom-hint" id="zoom-hint">100%</div>
         </div>
         <div class="mode-bar" id="mode-bar">
-          <button class="mode-btn ${tab === 'live' ? 'active' : ''}" data-tab="live">
+          <button class="mode-btn ${tab === 'live' ? 'active' : ''}" type="button" data-tab="live">
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M5 3l14 9-14 9z"/></svg>Live
           </button>
-          <button class="mode-btn ${tab === 'playback' ? 'active' : ''}" data-tab="playback">
+          <button class="mode-btn ${tab === 'playback' ? 'active' : ''}" type="button" data-tab="playback">
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="18" height="18" rx="2"/><path d="M3 9h18M9 21V9"/></svg>Playback
           </button>
-          ${hasPtz ? `<button class="mode-btn ${tab === 'ptz' ? 'active' : ''}" data-tab="ptz">
+          ${hasPtz ? `<button class="mode-btn ${tab === 'ptz' ? 'active' : ''}" type="button" data-tab="ptz">
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 2v20M2 12h20"/><circle cx="12" cy="12" r="4"/></svg>PTZ
           </button>` : ''}
-          ${hasOther ? `<button class="mode-btn ${tab === 'other' ? 'active' : ''}" data-tab="other">
+          ${hasOther ? `<button class="mode-btn ${tab === 'other' ? 'active' : ''}" type="button" data-tab="other">
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="1"/><circle cx="19" cy="12" r="1"/><circle cx="5" cy="12" r="1"/></svg>Other
           </button>` : ''}
         </div>
         <div class="tab-content ${tab === 'playback' ? 'visible' : ''}" id="tab-playback">
           <div class="tools">
             <div class="group">
-              <button class="tool" data-action="prev-day" title="Previous day">‹</button>
-              <button class="tool" data-action="today">Today</button>
-              <button class="tool" data-action="next-day" title="Next day">›</button>
+              <button class="tool" type="button" data-action="prev-day" title="Previous day">‹</button>
+              <button class="tool" type="button" data-action="today">Today</button>
+              <button class="tool" type="button" data-action="next-day" title="Next day">›</button>
             </div>
             <input class="date" type="date" id="date-input" aria-label="Recording date">
             <span class="spacer"></span>
-            <div class="group" aria-label="Timeline zoom">
-              <button class="tool" data-zoom="6">6h</button>
-              <button class="tool" data-zoom="12">12h</button>
-              <button class="tool active" data-zoom="24">24h</button>
+            <div class="group zoom-group" aria-label="Timeline zoom">
+              <button class="tool zoom-step" type="button" data-action="zoom-timeline-fewer" title="Show fewer hours (more detail)" aria-label="Show fewer hours" ${canZoomFewer ? '' : 'disabled'}>−</button>
+              <span class="zoom-label" id="zoom-label" aria-live="polite">${this._zoomHours}h</span>
+              <button class="tool zoom-step" type="button" data-action="zoom-timeline-more" title="Show more hours (wider range)" aria-label="Show more hours" ${canZoomMore ? '' : 'disabled'}>+</button>
             </div>
-            <button class="tool" data-action="refresh" title="Refresh recordings">↻</button>
+            <button class="tool" type="button" data-action="refresh" title="Refresh recordings">↻</button>
           </div>
           <div class="timeline-wrap">
             <div class="range-head">
@@ -345,11 +360,11 @@ class EzvizTimelineCard extends HTMLElement {
         ${hasPtz ? `<div class="tab-content ${tab === 'ptz' ? 'visible' : ''}" id="tab-ptz">
           <div class="ptz-panel">
             <div class="ptz-dpad">
-              <button class="ptz-btn ptz-up" data-ptz="up" title="Up">▲</button>
-              <button class="ptz-btn ptz-left" data-ptz="left" title="Left">◀</button>
-              <button class="ptz-btn ptz-center" disabled>PTZ</button>
-              <button class="ptz-btn ptz-right" data-ptz="right" title="Right">▶</button>
-              <button class="ptz-btn ptz-down" data-ptz="down" title="Down">▼</button>
+              <button class="ptz-btn ptz-up" type="button" data-ptz="up" title="Up">▲</button>
+              <button class="ptz-btn ptz-left" type="button" data-ptz="left" title="Left">◀</button>
+              <button class="ptz-btn ptz-center" type="button" disabled>PTZ</button>
+              <button class="ptz-btn ptz-right" type="button" data-ptz="right" title="Right">▶</button>
+              <button class="ptz-btn ptz-down" type="button" data-ptz="down" title="Down">▼</button>
             </div>
             <div class="ptz-hint">Tap a direction to move the camera</div>
           </div>
@@ -359,7 +374,6 @@ class EzvizTimelineCard extends HTMLElement {
         </div>` : ''}
       </div>`;
     this.shadowRoot.querySelector('#date-input').value = this._config?.default_date || this._dateString(new Date());
-    this.shadowRoot.querySelectorAll('[data-zoom]').forEach(b => b.classList.toggle('active', Number(b.dataset.zoom) === (this._config?.window_hours || 24)));
     if (hasOther) this._renderOtherTab();
     this._setupDocumentListeners();
   }
@@ -466,14 +480,6 @@ class EzvizTimelineCard extends HTMLElement {
         return;
       }
 
-      const zoom = ev.target.closest('[data-zoom]');
-      if (zoom) {
-        this._zoomHours = Number(zoom.dataset.zoom);
-        this._updateWindowAroundCenter();
-        this._setZoomButtons();
-        this._renderTimeline();
-        return;
-      }
       const recButton = ev.target.closest('[data-record-index]');
       if (recButton) {
         const rec = this._records[Number(recButton.dataset.recordIndex)];
@@ -491,6 +497,8 @@ class EzvizTimelineCard extends HTMLElement {
           this._setWindowForDate(true);
           this._loadDay();
           break;
+        case 'zoom-timeline-fewer': this._changeTimelineZoom(-1); break;
+        case 'zoom-timeline-more': this._changeTimelineZoom(1); break;
         case 'refresh': this._loadDay(); break;
       }
     });
@@ -549,7 +557,34 @@ class EzvizTimelineCard extends HTMLElement {
     this._setupZoomGestures();
   }
 
-  /* ============ Zoom & Fullscreen ============ */
+  /* ============ Timeline zoom (fewer/more hours) ============ */
+
+  _changeTimelineZoom(direction) {
+    const idx = TIMELINE_ZOOM_STEPS.indexOf(this._zoomHours);
+    if (idx < 0) {
+      // Current value not on the step grid (e.g. legacy config); snap to default.
+      this._zoomHours = 24;
+    } else {
+      const nextIdx = Math.max(0, Math.min(TIMELINE_ZOOM_STEPS.length - 1, idx + direction));
+      if (nextIdx === idx) return;
+      this._zoomHours = TIMELINE_ZOOM_STEPS[nextIdx];
+    }
+    this._updateWindowAroundCenter();
+    this._renderTimeline();
+    this._updateTimelineZoomUI();
+  }
+
+  _updateTimelineZoomUI() {
+    const label = this.shadowRoot?.querySelector('#zoom-label');
+    if (label) label.textContent = `${this._zoomHours}h`;
+    const idx = TIMELINE_ZOOM_STEPS.indexOf(this._zoomHours);
+    const fewerBtn = this.shadowRoot?.querySelector('[data-action="zoom-timeline-fewer"]');
+    const moreBtn = this.shadowRoot?.querySelector('[data-action="zoom-timeline-more"]');
+    if (fewerBtn) fewerBtn.disabled = idx <= 0;
+    if (moreBtn) moreBtn.disabled = idx < 0 || idx >= TIMELINE_ZOOM_STEPS.length - 1;
+  }
+
+  /* ============ Zoom & Fullscreen (player) ============ */
 
   _getActiveLayer() {
     return this._tab === 'playback'
@@ -583,9 +618,6 @@ class EzvizTimelineCard extends HTMLElement {
     ty = Math.max(-maxTy, Math.min(maxTy, ty));
     this._zoom = { scale, tx, ty };
 
-    // Cache static DOM references; querying #player / #zoom-hint / scanning
-    // the shadow tree for the <video> element on every pan frame is expensive
-    // on mobile and made dragging feel sluggish.
     if (!this._cachedPlayer) this._cachedPlayer = this.shadowRoot.querySelector('#player');
     if (!this._cachedHint) this._cachedHint = this.shadowRoot.querySelector('#zoom-hint');
     const player = this._cachedPlayer;
@@ -643,9 +675,6 @@ class EzvizTimelineCard extends HTMLElement {
   _toggleFullscreen() {
     const player = this.shadowRoot.querySelector('#player');
     if (!player) return;
-    // Detect ANY fullscreen element (standard + vendor prefixes).
-    // A native <video> may be the fullscreen element instead of our
-    // container — still exit it so the button never appears dead.
     const fsEl = document.fullscreenElement
       || document.webkitFullscreenElement
       || document.mozFullScreenElement
@@ -690,10 +719,6 @@ class EzvizTimelineCard extends HTMLElement {
     });
 
     player.addEventListener('pointerdown', (ev) => {
-      // Never hijack pointer events from the card's overlay controls.
-      // Without this guard, pointer capture steals the click from the
-      // fullscreen button when the player is zoomed (pan mode active),
-      // which makes fullscreen exit appear broken.
       if (ev.target?.closest?.('.player-ctrls')) return;
 
       if (ev.pointerType === 'mouse' && ev.button !== 0) return;
@@ -733,9 +758,6 @@ class EzvizTimelineCard extends HTMLElement {
         this._panStart = null;
         player.classList.remove('panning');
       } else if (this._pointers.size === 1 && this._zoom.scale > 1.01) {
-        // Pinch ended but one finger remains. Promote it to pan mode so the
-        // user can keep dragging without lifting and re-touching — otherwise
-        // pan only starts on a fresh pointerdown and the gesture feels heavy.
         const remaining = this._pointers.values().next().value;
         this._panStart = { x: remaining.x, y: remaining.y, tx: this._zoom.tx, ty: this._zoom.ty };
         player.classList.add('panning');
@@ -743,9 +765,6 @@ class EzvizTimelineCard extends HTMLElement {
     };
     player.addEventListener('pointerup', endPointer);
     player.addEventListener('pointercancel', endPointer);
-    // No pointerleave handler: touch pointer capture guarantees pointerup and
-    // pointercancel fire even when the finger leaves the element, so
-    // pointerleave would only cancel an active pan mid-drag.
   }
 
   /* ============ Live watchdog: auto-reconnect + live-edge catch-up ============ */
@@ -782,7 +801,6 @@ class EzvizTimelineCard extends HTMLElement {
     const onPlaying = () => {
       this._liveBuffering = false;
       this._liveRetryCount = 0;
-      // Give the player a moment to settle before checking live edge
       setTimeout(() => this._syncLiveEdge(true), 500);
     };
     const onWaiting = () => { this._liveBuffering = true; };
@@ -795,10 +813,8 @@ class EzvizTimelineCard extends HTMLElement {
     this._liveVideoEl = video;
     this._liveVideoHandlers = { video, onPlaying, onWaiting, onError };
 
-    // Initial sync after the stream stabilizes
     setTimeout(() => this._syncLiveEdge(true), 1500);
 
-    // Visibility change: on return to tab, snap back to live
     if (!this._onVisibilityChange) {
       this._onVisibilityChange = () => {
         if (document.visibilityState === 'visible' && this._tab !== 'playback') {
@@ -817,7 +833,6 @@ class EzvizTimelineCard extends HTMLElement {
     if (threshold <= 0) return;
 
     const now = Date.now();
-    // Cooldown: avoid seek storms on flaky connections
     if (!force && now - this._lastSeekAt < 15000) return;
 
     const slot = this.shadowRoot?.querySelector('#live-slot');
@@ -828,12 +843,10 @@ class EzvizTimelineCard extends HTMLElement {
 
     try {
       const liveEdge = video.seekable.end(video.seekable.length - 1);
-      // WebRTC streams often report Infinity; skip them — they are already live
       if (!isFinite(liveEdge) || liveEdge <= 0) return;
       const drift = liveEdge - video.currentTime;
       if (drift > threshold) {
         this._lastSeekAt = now;
-        // Land 1s behind the live edge to give HLS room to refill
         video.currentTime = Math.max(0, liveEdge - 1);
       }
     } catch (_) {}
@@ -843,7 +856,7 @@ class EzvizTimelineCard extends HTMLElement {
     if (!this.isConnected) return;
     if (this._tab === 'playback') return;
     if (this._config?.live_reconnect === false) return;
-    if (this._liveRetryTimer) return; // already scheduled
+    if (this._liveRetryTimer) return;
 
     this._liveRetryCount++;
     if (this._liveRetryCount > 3) {
@@ -855,7 +868,7 @@ class EzvizTimelineCard extends HTMLElement {
         </svg>
         <strong>Live stream lost</strong>
         <small>The stream could not be restored automatically.<br>Tap Reconnect, or switch tabs and come back.</small>
-        <button class="retry-btn" id="retry-live">Reconnect</button>
+        <button class="retry-btn" type="button" id="retry-live">Reconnect</button>
       </div>`;
       return;
     }
@@ -879,7 +892,6 @@ class EzvizTimelineCard extends HTMLElement {
     const playbackLayer = this.shadowRoot.querySelector('#playback-layer');
 
     if (tab === 'playback') {
-      // Live watchdog is not needed while viewing archive
       this._clearLiveWatchers();
       liveLayer?.classList.add('hidden');
       playbackLayer?.classList.remove('hidden');
@@ -895,7 +907,6 @@ class EzvizTimelineCard extends HTMLElement {
       if (!this.shadowRoot.querySelector('#live-slot').children.length) {
         this._mountLivePlayer();
       } else {
-        // Live layer was hidden — reattach watchers and snap to live
         setTimeout(() => {
           this._attachLiveWatchers();
           this._syncLiveEdge(true);
@@ -947,7 +958,7 @@ class EzvizTimelineCard extends HTMLElement {
           <div class="other-name">${this._escape(name)}</div>
           <div class="other-state">${isOn ? 'On' : 'Off'}</div>
         </div>
-        <button class="toggle ${isOn ? 'on' : ''}" data-other-toggle="${idx}" aria-label="Toggle"></button>
+        <button class="toggle ${isOn ? 'on' : ''}" type="button" data-other-toggle="${idx}" aria-label="Toggle"></button>
       </div>`;
     }
 
@@ -959,8 +970,8 @@ class EzvizTimelineCard extends HTMLElement {
           <div class="other-state">${isOn ? 'On' : 'Off'}</div>
         </div>
         <div class="other-btns">
-          <button class="siren-btn ${isOn ? 'active' : ''}" data-other-siren="on" data-other-idx="${idx}">🔊 On</button>
-          <button class="siren-btn ${!isOn ? 'active' : ''}" data-other-siren="off" data-other-idx="${idx}">🔇 Off</button>
+          <button class="siren-btn ${isOn ? 'active' : ''}" type="button" data-other-siren="on" data-other-idx="${idx}">🔊 On</button>
+          <button class="siren-btn ${!isOn ? 'active' : ''}" type="button" data-other-siren="off" data-other-idx="${idx}">🔇 Off</button>
         </div>
       </div>`;
     }
@@ -971,7 +982,7 @@ class EzvizTimelineCard extends HTMLElement {
           <div class="other-name">${this._escape(name)}</div>
           <div class="other-state">${this._escape(s)}</div>
         </div>
-        <button class="other-btn" data-other-press="${idx}">Press</button>
+        <button class="other-btn" type="button" data-other-press="${idx}">Press</button>
       </div>`;
     }
 
@@ -981,7 +992,7 @@ class EzvizTimelineCard extends HTMLElement {
           <div class="other-name">${this._escape(name)}</div>
           <div class="other-state">${this._escape(s)}</div>
         </div>
-        <button class="other-btn" data-other-script="${idx}">Run</button>
+        <button class="other-btn" type="button" data-other-script="${idx}">Run</button>
       </div>`;
     }
 
@@ -1021,9 +1032,6 @@ class EzvizTimelineCard extends HTMLElement {
       return;
     }
 
-    // Prefer ha-camera-stream: it picks WebRTC (go2rtc) when the camera
-    // supports it, giving sub-second latency and much faster startup.
-    // Fall back to ha-hls-player only if ha-camera-stream is unavailable.
     const useCameraStream = !!customElements.get('ha-camera-stream');
     const useHls = !useCameraStream && !!customElements.get('ha-hls-player');
     const player = document.createElement(useCameraStream ? 'ha-camera-stream' : useHls ? 'ha-hls-player' : 'div');
@@ -1043,7 +1051,6 @@ class EzvizTimelineCard extends HTMLElement {
     player.style.cssText = 'width:100%;height:100%;display:block;background:#05070a';
     slot.appendChild(player);
 
-    // Attach watchdog after the DOM settles
     setTimeout(() => this._attachLiveWatchers(), 800);
   }
 
@@ -1154,7 +1161,7 @@ class EzvizTimelineCard extends HTMLElement {
   _showErrorPlayer(title, details) {
     const slot = this.shadowRoot.querySelector('#playback-slot');
     if (!slot) return;
-    slot.innerHTML = `<div class="placeholder"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><circle cx="12" cy="12" r="9"/><path d="M12 7v6m0 4h.01"/></svg><strong>${this._escape(title)}</strong><small>${this._escape(details)}</small><button class="retry-btn" id="try-again">Try again</button></div>`;
+    slot.innerHTML = `<div class="placeholder"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><circle cx="12" cy="12" r="9"/><path d="M12 7v6m0 4h.01"/></svg><strong>${this._escape(title)}</strong><small>${this._escape(details)}</small><button class="retry-btn" type="button" id="try-again">Try again</button></div>`;
     slot.querySelector('#try-again')?.addEventListener('click', () => this._playRecord(this._activeRecord, 0));
   }
 
@@ -1277,7 +1284,7 @@ class EzvizTimelineCard extends HTMLElement {
       return;
     }
     const newest = [...this._records].sort((a,b) => b.start - a.start);
-    list.innerHTML = newest.map(r => `<button class="record ${this._activeRecord?.key === r.key ? 'active' : ''}" data-record-index="${r.index}">
+    list.innerHTML = newest.map(r => `<button class="record ${this._activeRecord?.key === r.key ? 'active' : ''}" type="button" data-record-index="${r.index}">
       <span class="rec-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="m9 6 10 6-10 6z"/></svg></span>
       <span class="rec-text"><span class="rec-time">${this._escape(r.timeLabel)}</span><span class="rec-meta">${this._escape(this._date)} · ${this._fmtDuration(Math.max(0,r.end-r.start))}</span></span>
       <span class="rec-state">${r.cached ? 'CACHED' : 'DOWNLOAD'}</span>
